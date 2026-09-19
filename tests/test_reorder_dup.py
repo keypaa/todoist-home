@@ -37,15 +37,13 @@ def test_day_orders_per_day_and_today_join():
                         "args": {"day": day, "ids_to_orders": {tid: 7}}}])
     assert r.json()["sync_status"]["pd-1"] == "ok", r.text
     j = r.json()
-    # per-day entry must be stored under the requested day, not today
-    assert j["day_orders"].get(tid) != 7 or True  # today map may differ
-    # full sync items carry day_order for today; fetch incremental to see join
-    # direct DB check via sync day_orders for that day requires re-read;
-    # at minimum the stored value must be visible via a second sync read
-    # that includes today mapping only if day == today, else not conflated.
     today = datetime.date.today().isoformat()
+    # Non-today write must be stored under that day and observable via
+    # day_orders_by_day, not conflated into today's flat map.
+    assert "day_orders_by_day" in j, j.keys()
+    assert j["day_orders_by_day"].get(day, {}).get(tid) == 7, j["day_orders_by_day"]
     if day != today:
-        assert j["day_orders"].get(tid) is None or j["day_orders"].get(tid) != 7, j["day_orders"]
+        assert j["day_orders"].get(tid) != 7, j["day_orders"]
     # today ordering still joins: set today order and verify items join
     r2 = _sync(c, j["sync_token"], [{"type": "item_update_day_orders", "uuid": "pd-2",
                                      "args": {"ids_to_orders": {tid: 3}}}])
@@ -53,6 +51,30 @@ def test_day_orders_per_day_and_today_join():
     items = {i["id"]: i for i in r2.json()["items"] if "content" in i}
     assert items[tid]["day_order"] == 3, items[tid]
     assert r2.json()["day_orders"].get(tid) == 3
+
+
+def test_upcoming_day_order_observable_per_task_day():
+    c = TestClient(app)
+    today = datetime.date.today().isoformat()
+    day = (datetime.date.today() + datetime.timedelta(days=5)).isoformat()
+    assert day != today
+    tid = c.post("/api/v1/tasks", json={"content": "upcoming reorder", "due": {"date": day}}, headers=H).json()["id"]
+    r = _sync(c, "*", [{"type": "item_update_day_orders", "uuid": "up-1",
+                        "args": {"day": day, "ids_to_orders": {tid: 7}}}])
+    assert r.json()["sync_status"]["up-1"] == "ok", r.text
+    j = r.json()
+    # Upcoming write observable in per-day map, not today's flat map.
+    assert j["day_orders_by_day"].get(day, {}).get(tid) == 7, j
+    assert j["day_orders"].get(tid) != 7, j["day_orders"]
+    # Sync items join per-task day (due_date), so Upcoming reorder works.
+    items = {i["id"]: i for i in j["items"] if "content" in i}
+    assert items[tid]["day_order"] == 7, items[tid]
+    # REST joins per-task day (due_date) as well.
+    got = c.get(f"/api/v1/tasks/{tid}", headers=H).json()
+    assert got["day_order"] == 7, got
+    lst = c.get("/api/v1/tasks", headers=H).json()["results"]
+    lmap = {t["id"]: t for t in lst}
+    assert lmap[tid]["day_order"] == 7, lmap[tid]
 
 
 def test_inbox_fractional_reorder_scoped():
@@ -147,6 +169,9 @@ def test_duplicate_copies_without_comments_reminders():
     assert dup["due"]["date"] == "2026-10-01"
     assert dup["deadline"]["date"] == "2026-10-05"
     assert dup["duration"]["amount"] == 30
+    # Fresh fractional key: no sort collision with source.
+    assert dup["order_key"] != src["order_key"], (dup, src)
+    assert dup["order_key"] > src["order_key"], (dup, src)
     # no comments/reminders copied: new task has zero reminders
     from app.api_tasks import _con as _tasks_con
     con = _tasks_con()

@@ -52,14 +52,46 @@ def _day_order_for(con, tid, day):
         return 0
 
 
+def _effective_due_day(task_dict, fallback):
+    # Upcoming reorder: join day_orders on the task's own due day, not
+    # always today. Fallback covers undated tasks (Inbox/Today default).
+    due = task_dict.get("due") or {}
+    d = due.get("date")
+    if isinstance(d, str) and d.strip():
+        try:
+            datetime.date.fromisoformat(d.strip()[:10])
+            return d.strip()[:10]
+        except ValueError:
+            pass
+    dt = due.get("datetime")
+    if isinstance(dt, str) and len(dt.strip()) >= 10:
+        try:
+            datetime.date.fromisoformat(dt.strip()[:10])
+            return dt.strip()[:10]
+        except ValueError:
+            pass
+    if isinstance(fallback, str) and fallback.strip():
+        return fallback.strip()[:10]
+    return datetime.date.today().isoformat()
+
+
 def _with_day_order(con, task_dict, day=None):
-    if day is None:
-        day = datetime.date.today().isoformat()
     try:
-        task_dict["day_order"] = _day_order_for(con, task_dict.get("id"), day)
+        eff = _effective_due_day(task_dict, day)
+        task_dict["day_order"] = _day_order_for(con, task_dict.get("id"), eff)
     except Exception:
         task_dict.setdefault("day_order", 0)
     return task_dict
+
+
+def _fresh_order_key(src_key, nid):
+    # Inbox fractional: seed a unique key sorting just after the source so
+    # the duplicate never collides. Appending keeps it between source and
+    # the next sibling (e.g. "a0" -> "a0n…ab12" < "a1").
+    base = src_key if isinstance(src_key, str) and src_key.strip() else "a0"
+    base = base.strip()
+    suffix = "".join(ch for ch in str(nid or "") if ch.isalnum())[-6:] or "x"
+    return f"{base}n{suffix}"
 
 
 def _strip_name(name):
@@ -696,6 +728,7 @@ def duplicate_task(tid: str, uid: str = Depends(require_user)):
         raise HTTPException(404, "not found")
     nid = new_id()
     now = now_iso()
+    fresh_key = _fresh_order_key(r["order_key"] if "order_key" in r.keys() else "a0", nid)
     con.execute(
         "INSERT INTO tasks(id,user_id,content,description,project_id,section_id,parent_id,"
         "priority,due_date,due_datetime,due_timezone,due_string,due_lang,is_recurring,"
@@ -707,7 +740,7 @@ def duplicate_task(tid: str, uid: str = Depends(require_user)):
             r["due_date"], r["due_datetime"], r["due_timezone"], r["due_string"],
             r["due_lang"] or "en", r["is_recurring"] or 0,
             r["deadline_date"], r["duration_amount"], r["duration_unit"],
-            r["responsible_uid"], r["order_key"] or "a0", now, now,
+            r["responsible_uid"], fresh_key, now, now,
         ),
     )
     for (lid,) in con.execute("SELECT label_id FROM task_labels WHERE task_id=?", (tid,)).fetchall():

@@ -482,6 +482,34 @@ async def sync_read(request: Request, uid: str = Depends(require_user)):
     labels = [{"id": r["id"], "name": r["name"], "is_deleted": False} for r in lrows]
 
     # Items.
+    # day_order joins per-task day (due_date) so Today *and* Upcoming reorder
+    # are observable; the flat `day_orders` map stays today-only for compat
+    # while `day_orders_by_day` exposes every day.
+    do_all = {}
+    for _r in con.execute("SELECT task_id, day, ord FROM day_orders").fetchall():
+        do_all.setdefault(_r["day"], {})[_r["task_id"]] = _r["ord"]
+    def _eff_day(row):
+        try:
+            dd = row["due_date"]
+        except Exception:
+            dd = None
+        if isinstance(dd, str) and dd.strip():
+            try:
+                datetime.date.fromisoformat(dd.strip()[:10])
+                return dd.strip()[:10]
+            except ValueError:
+                pass
+        try:
+            ddt = row["due_datetime"]
+        except Exception:
+            ddt = None
+        if isinstance(ddt, str) and len(ddt.strip()) >= 10:
+            try:
+                datetime.date.fromisoformat(ddt.strip()[:10])
+                return ddt.strip()[:10]
+            except ValueError:
+                pass
+        return today
     if is_full or since is None:
         trows = con.execute(
             "SELECT * FROM tasks WHERE user_id=? AND completed=0 AND is_deleted=0", (uid,)
@@ -489,10 +517,7 @@ async def sync_read(request: Request, uid: str = Depends(require_user)):
         items = []
         for r in trows:
             d = task_to_api(r, _labels(con, r["id"]))
-            do = con.execute(
-                "SELECT ord FROM day_orders WHERE task_id=? AND day=?", (r["id"], today)
-            ).fetchone()
-            d["day_order"] = do["ord"] if do else 0
+            d["day_order"] = do_all.get(_eff_day(r), {}).get(r["id"], 0)
             items.append(d)
     else:
         # Incremental: full rescan filtered by updated_at + tombstones.
@@ -507,15 +532,11 @@ async def sync_read(request: Request, uid: str = Depends(require_user)):
             if r["completed"]:
                 continue
             d = task_to_api(r, _labels(con, r["id"]))
-            do = con.execute(
-                "SELECT ord FROM day_orders WHERE task_id=? AND day=?", (r["id"], today)
-            ).fetchone()
-            d["day_order"] = do["ord"] if do else 0
+            d["day_order"] = do_all.get(_eff_day(r), {}).get(r["id"], 0)
             items.append(d)
 
-    # day_orders for today.
-    dorows = con.execute("SELECT task_id, ord FROM day_orders WHERE day=?", (today,)).fetchall()
-    day_orders = {r["task_id"]: r["ord"] for r in dorows}
+    # day_orders for today (compat) + per-day map for Upcoming.
+    day_orders = dict(do_all.get(today, {}))
 
     new_token = new_id()
     now = now_iso()
@@ -535,6 +556,7 @@ async def sync_read(request: Request, uid: str = Depends(require_user)):
         "reminders": [],
         "completed_info": [],
         "day_orders": day_orders,
+        "day_orders_by_day": {k: dict(v) for k, v in do_all.items()},
         "filters": [],
         "temp_id_mapping": temp_id_mapping,
         "sync_status": sync_status,
