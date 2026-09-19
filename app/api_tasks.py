@@ -81,22 +81,81 @@ def _parse_branch(branch):
     }
 
 
+def _parse_dt(s):
+    if not s:
+        return None
+    try:
+        t = str(s).strip()
+        if t.endswith("Z"):
+            t = t[:-1] + "+00:00"
+        dt = datetime.datetime.fromisoformat(t)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=datetime.timezone.utc)
+        return dt
+    except (ValueError, TypeError):
+        return None
+
+
+def _today_in_tz(tzname, fallback):
+    if not tzname:
+        return fallback
+    try:
+        from zoneinfo import ZoneInfo
+
+        return datetime.datetime.now(ZoneInfo(str(tzname))).date().isoformat()
+    except Exception:
+        return fallback
+
+
+def _now_in_tz(tzname, fallback_str):
+    if not tzname:
+        return _parse_dt(fallback_str) or datetime.datetime.now(datetime.timezone.utc)
+    try:
+        from zoneinfo import ZoneInfo
+
+        return datetime.datetime.now(ZoneInfo(str(tzname)))
+    except Exception:
+        return _parse_dt(fallback_str) or datetime.datetime.now(datetime.timezone.utc)
+
+
 def _branch_matches(task, proj_name_by_id, proj_id_by_lower, branch, today, now):
+    tz = ((task.get("due") or {}).get("timezone")) or None
+    today_eff = _today_in_tz(tz, today)
+    now_eff = _now_in_tz(tz, now)
     if branch["today"]:
         due = task.get("due") or {}
         dd = due.get("date")
         dt = due.get("datetime") or ""
-        if not ((dd == today) or (dt and dt[:10] == today)):
+        hit = bool(dd == today_eff)
+        if not hit and dt:
+            pdt = _parse_dt(dt)
+            if pdt is not None:
+                try:
+                    if tz:
+                        from zoneinfo import ZoneInfo
+
+                        pdt = pdt.astimezone(ZoneInfo(str(tz)))
+                    hit = bool(pdt.date().isoformat() == today_eff)
+                except Exception:
+                    hit = bool(dt[:10] == today_eff)
+            else:
+                hit = bool(dt[:10] == today_eff)
+        if not hit:
             return False
     if branch["overdue"]:
         due = task.get("due") or {}
         dd = due.get("date") or ""
         dt = due.get("datetime") or ""
         is_over = False
-        if dd and dd < today:
+        if dd and dd < today_eff:
             is_over = True
-        if dt and dt < now:
-            is_over = True
+        if dt:
+            pdt = _parse_dt(dt)
+            if pdt is not None:
+                if pdt < now_eff:
+                    is_over = True
+            elif dt < now:
+                is_over = True
         if not is_over:
             return False
     if branch["inbox"] and task.get("project_id") != "inbox":
@@ -137,11 +196,57 @@ def create_task(body: dict, uid: str = Depends(require_user)):
     tid = new_id()
     now = now_iso()
     pid = body.get("project_id", "inbox")
-    con.execute("INSERT INTO tasks(id,user_id,content,description,project_id,section_id,parent_id,priority,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
-        (tid, uid, body["content"], body.get("description", ""), pid, body.get("section_id"), body.get("parent_id"), body.get("priority", 1), now, now))
+    # Timezone rule: store due_timezone (+ sibling due columns) on create.
+    # Partial due dict merges; flat due_* keys override. Absent -> NULL/0,
+    # due_lang defaults to 'en'. Title-only updates later preserve these.
+    due_dict = body.get("due") if isinstance(body.get("due"), dict) else {}
+    if "due" in body and body["due"] is None:
+        due_dict = None
+    dd_date = dd_dt = dd_tz = dd_str = None
+    dd_lang = "en"
+    dd_recur = 0
+    if due_dict is not None:
+        if "date" in due_dict:
+            dd_date = due_dict["date"]
+        if "datetime" in due_dict:
+            dd_dt = due_dict["datetime"]
+        if "timezone" in due_dict:
+            dd_tz = due_dict["timezone"]
+        if "string" in due_dict:
+            dd_str = due_dict["string"]
+        if "lang" in due_dict:
+            dd_lang = due_dict["lang"] or "en"
+        if "is_recurring" in due_dict:
+            dd_recur = 1 if due_dict["is_recurring"] else 0
+    for flat, _col in (
+        ("due_date", "date"),
+        ("due_datetime", "datetime"),
+        ("due_timezone", "timezone"),
+        ("due_string", "string"),
+        ("due_lang", "lang"),
+        ("is_recurring", "recurring"),
+    ):
+        if flat in body:
+            v = body[flat]
+            if flat == "due_date":
+                dd_date = v
+            elif flat == "due_datetime":
+                dd_dt = v
+            elif flat == "due_timezone":
+                dd_tz = v
+            elif flat == "due_string":
+                dd_str = v
+            elif flat == "due_lang":
+                dd_lang = v or "en"
+            elif flat == "is_recurring":
+                dd_recur = 1 if v else 0
+    con.execute("INSERT INTO tasks(id,user_id,content,description,project_id,section_id,parent_id,priority,due_date,due_datetime,due_timezone,due_string,due_lang,is_recurring,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (tid, uid, body["content"], body.get("description", ""), pid, body.get("section_id"), body.get("parent_id"), body.get("priority", 1), dd_date, dd_dt, dd_tz, dd_str, dd_lang, dd_recur, now, now))
+    if isinstance(body.get("labels"), list) and body["labels"]:
+        _ensure_rest_labels(con, uid, tid, body["labels"])
     con.commit()
     row = con.execute("SELECT * FROM tasks WHERE id=?", (tid,)).fetchone()
-    return task_to_api(row, [])
+    return task_to_api(row, _labels(con, tid))
 
 
 @router.get("/api/v1/tasks")
