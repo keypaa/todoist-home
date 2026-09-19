@@ -228,7 +228,7 @@ def _exec_item_move(con, uid, args, temp_map, now):
 
 
 def _exec_item_close(con, uid, args, temp_map, now):
-    tid = args.get("id")
+    tid = _resolve_ref(args.get("id"), temp_map)
     if not tid:
         raise ValueError("id required")
     row = con.execute("SELECT * FROM tasks WHERE id=? AND user_id=?", (tid, uid)).fetchone()
@@ -242,7 +242,7 @@ def _exec_item_close(con, uid, args, temp_map, now):
 
 
 def _exec_item_delete(con, uid, args, temp_map, now):
-    tid = args.get("id")
+    tid = _resolve_ref(args.get("id"), temp_map)
     if not tid:
         raise ValueError("id required")
     row = con.execute("SELECT * FROM tasks WHERE id=? AND user_id=?", (tid, uid)).fetchone()

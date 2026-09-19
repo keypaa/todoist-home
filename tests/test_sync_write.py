@@ -101,3 +101,36 @@ def test_day_orders_and_reminder_and_close_hides_children():
     assert j2["sync_status"]["o-4"] == "ok", j2
     assert j2["sync_status"]["o-5"] == "ok", j2
     assert j2["day_orders"].get(id2) == 1
+
+
+def test_close_delete_resolve_same_batch_temp_ids():
+    c = TestClient(app)
+    r = _post(c, "*", [
+        {"type": "item_add", "temp_id": "t-cd-p", "uuid": "cd-1",
+         "args": {"content": "CDParent", "project_id": "inbox"}},
+        {"type": "item_add", "temp_id": "t-cd-c", "uuid": "cd-2",
+         "args": {"content": "CDChild", "project_id": "inbox", "parent_id": "t-cd-p"}},
+        {"type": "item_close", "uuid": "cd-3", "args": {"id": "t-cd-c"}},
+        {"type": "item_delete", "uuid": "cd-4", "args": {"id": "t-cd-p"}},
+    ])
+    j = r.json()
+    assert j["sync_status"]["cd-3"] == "ok", j["sync_status"]
+    assert j["sync_status"]["cd-4"] == "ok", j["sync_status"]
+
+
+def test_batch_cap_100_with_chaining():
+    c = TestClient(app)
+    big = [
+        {"type": "item_add", "temp_id": f"t-cap{i}", "uuid": f"cap-{i}",
+         "args": {"content": f"Cap{i}", "project_id": "inbox"}}
+        for i in range(105)
+    ]
+    r = _post(c, "*", big)
+    j = r.json()
+    assert len(j["sync_status"]) == 100, len(j["sync_status"])
+    assert all(v == "ok" for v in j["sync_status"].values()), j["sync_status"]
+    assert len(j["temp_id_mapping"]) == 100, len(j["temp_id_mapping"])
+    r2 = _post(c, j["sync_token"], big[100:])
+    j2 = r2.json()
+    assert len(j2["sync_status"]) == 5, j2["sync_status"]
+    assert all(v == "ok" for v in j2["sync_status"].values()), j2["sync_status"]
