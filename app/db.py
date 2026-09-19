@@ -12,6 +12,15 @@ CREATE TABLE IF NOT EXISTS day_orders(task_id TEXT NOT NULL, day TEXT NOT NULL, 
 CREATE TABLE IF NOT EXISTS sync_state(token TEXT PRIMARY KEY, created_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS idempotency(key TEXT PRIMARY KEY, response TEXT NOT NULL);
 """
+def idempotency_get(con, key):
+    row = con.execute("SELECT response FROM idempotency WHERE key=?", (key,)).fetchone()
+    return row["response"] if row else None
+
+
+def idempotency_put(con, key, response):
+    con.execute("INSERT OR IGNORE INTO idempotency(key,response) VALUES(?,?)", (key, response))
+
+
 def get_db_path():
     base = os.environ.get("OPENDOIST_DB", os.path.expanduser("~/.local/share/opendoist/opendoist.db"))
     d = os.path.dirname(base)
