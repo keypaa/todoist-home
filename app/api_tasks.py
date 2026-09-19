@@ -23,7 +23,7 @@ def _con():
             _mem_con = get_db()
             _mem_con.executescript(SCHEMA)
             _mem_con.execute("INSERT OR IGNORE INTO users(id,email) VALUES('1','local@opendoist')")
-            _mem_con.execute("INSERT OR IGNORE INTO projects(id,name) VALUES('inbox','Inbox')")
+            _mem_con.execute("INSERT OR IGNORE INTO projects(id,user_id,name) VALUES('inbox','1','Inbox')")
             _mem_con.commit()
         return _mem_con
     return get_db()
@@ -99,7 +99,7 @@ def quick_add(body: dict, request: Request, uid: str = Depends(require_user)):
             )
     else:
         pid = "inbox"
-        con.execute("INSERT OR IGNORE INTO projects(id,name) VALUES('inbox','Inbox')")
+        con.execute("INSERT OR IGNORE INTO projects(id,user_id,name) VALUES('inbox',?,'Inbox')", (uid,))
     # Resolve section name -> id (auto-create under resolved project).
     sid = None
     if p["section"]:
