@@ -138,11 +138,12 @@ def _exec_item_add(con, uid, args, temp_map, now):
     due = _due_columns(args.get("due") or {})
     deadline = args.get("deadline") or {}
     duration = args.get("duration") or {}
+    order_key = args.get("order_key") if isinstance(args.get("order_key"), str) and args.get("order_key").strip() else "a0"
     con.execute(
         "INSERT INTO tasks(id,user_id,content,description,project_id,section_id,parent_id,priority,"
         "due_date,due_datetime,due_timezone,due_string,due_lang,is_recurring,"
-        "deadline_date,duration_amount,duration_unit,responsible_uid,created_at,updated_at)"
-        " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        "deadline_date,duration_amount,duration_unit,responsible_uid,order_key,created_at,updated_at)"
+        " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (
             tid, uid, content, args.get("description") or "", pid,
             args.get("section_id"), parent, args.get("priority", 1),
@@ -151,7 +152,7 @@ def _exec_item_add(con, uid, args, temp_map, now):
             deadline.get("date") if isinstance(deadline, dict) else None,
             duration.get("amount") if isinstance(duration, dict) else None,
             (duration.get("unit") or "minute") if isinstance(duration, dict) else None,
-            args.get("responsible_uid"), now, now,
+            args.get("responsible_uid"), order_key, now, now,
         ),
     )
     _ensure_labels(con, uid, tid, args.get("labels"))
@@ -170,6 +171,11 @@ def _exec_item_update(con, uid, args, temp_map, now):
         if key in args and args[key] is not None:
             sets.append(f"{key}=?")
             vals.append(args[key])
+    for alias in ("assignee_id", "assignee"):
+        if alias in args and args[alias] is not None:
+            sets.append("responsible_uid=?")
+            vals.append(args[alias])
+            break
     if "parent_id" in args:
         sets.append("parent_id=?")
         vals.append(_resolve_ref(args.get("parent_id"), temp_map))
@@ -195,6 +201,15 @@ def _exec_item_update(con, uid, args, temp_map, now):
             if "unit" in du:
                 sets.append("duration_unit=?")
                 vals.append(du["unit"] or "minute")
+    if "order_key" in args and args["order_key"] is not None:
+        # Inbox fractional reorder: opaque string compared lexicographically,
+        # scoped to the task's own project+section+parent group. Only this
+        # row is touched so hidden (completed/deleted) siblings keep keys.
+        ok = args["order_key"]
+        if not isinstance(ok, str) or not ok.strip():
+            raise ValueError("invalid order_key")
+        sets.append("order_key=?")
+        vals.append(ok)
     if sets:
         sets.append("updated_at=?")
         vals.append(now)
@@ -251,16 +266,59 @@ def _exec_item_delete(con, uid, args, temp_map, now):
     con.execute("UPDATE tasks SET is_deleted=1,updated_at=? WHERE id=? AND user_id=?", (now, tid, uid))
 
 
-def _exec_day_orders(con, args, temp_map, today):
-    mapping = args.get("ids_to_orders", args)
+def _exec_day_orders(con, args, temp_map, today, uid=None, now=None):
+    # Per-day upsert: `{"day": "YYYY-MM-DD", "ids_to_orders": {...}}` stores
+    # under that day; bare `{"ids_to_orders": {...}}` or a raw mapping
+    # defaults to today. Today/Upcoming reads join day_orders for the day.
+    day = today
+    mapping = args
+    if isinstance(args, dict):
+        if isinstance(args.get("day"), str) and args["day"].strip():
+            dstr = args["day"].strip()
+            try:
+                datetime.date.fromisoformat(dstr)
+            except ValueError:
+                raise ValueError(f"invalid day: {dstr!r}")
+            day = dstr
+        if "ids_to_orders" in args:
+            mapping = args.get("ids_to_orders") or {}
+        elif "day" in args:
+            mapping = {k: v for k, v in args.items() if k != "day"}
     pairs = mapping.items() if isinstance(mapping, dict) else mapping
+    if isinstance(mapping, dict):
+        pairs = list(mapping.items())
+    elif isinstance(mapping, (list, tuple)):
+        pairs = list(mapping)
+    else:
+        raise ValueError("ids_to_orders required")
     for task_id, ord in pairs:
         task_id = _resolve_ref(task_id, temp_map)
+        if not task_id:
+            raise ValueError("id required")
+        try:
+            ord_int = int(ord)
+        except (ValueError, TypeError):
+            raise ValueError(f"invalid ord: {ord!r}")
+        if uid is not None:
+            row = con.execute(
+                "SELECT id FROM tasks WHERE id=? AND user_id=?", (task_id, uid)
+            ).fetchone()
+        else:
+            row = con.execute("SELECT id FROM tasks WHERE id=?", (task_id,)).fetchone()
+        if not row:
+            raise ValueError("not found")
         con.execute(
             "INSERT INTO day_orders(task_id,day,ord) VALUES(?,?,?)"
             " ON CONFLICT(task_id,day) DO UPDATE SET ord=excluded.ord",
-            (task_id, today, int(ord)),
+            (task_id, day, ord_int),
         )
+        # Bump updated_at so incremental `updated_at > since` rescans surface
+        # the new day_order without requiring a full sync.
+        if now is not None:
+            if uid is not None:
+                con.execute("UPDATE tasks SET updated_at=? WHERE id=? AND user_id=?", (now, task_id, uid))
+            else:
+                con.execute("UPDATE tasks SET updated_at=? WHERE id=?", (now, task_id))
 
 
 def _exec_reminder_add(con, args, temp_map):
@@ -314,8 +372,9 @@ def _process_commands(con, uid, commands, today, since=None):
         if last is not None and now <= last:
             now = _bump_ts(last)
         last = now
+        real_id = None
+        con.execute("SAVEPOINT opendoist_cmd")
         try:
-            real_id = None
             if ctype == "item_add":
                 real_id = _EXECUTORS[ctype](con, uid, args, temp_id_mapping, now)
                 temp_id = cmd.get("temp_id")
@@ -324,13 +383,19 @@ def _process_commands(con, uid, commands, today, since=None):
             elif ctype in _EXECUTORS:
                 _EXECUTORS[ctype](con, uid, args, temp_id_mapping, now)
             elif ctype == "item_update_day_orders":
-                _exec_day_orders(con, args, temp_id_mapping, today)
+                _exec_day_orders(con, args, temp_id_mapping, today, uid, now)
             elif ctype == "reminder_add":
                 _exec_reminder_add(con, args, temp_id_mapping)
             else:
                 raise ValueError(f"unknown command: {ctype}")
+            con.execute("RELEASE opendoist_cmd")
             status = "ok"
         except Exception as exc:  # noqa: BLE001 - surfaced per-uuid in sync_status
+            try:
+                con.execute("ROLLBACK TO opendoist_cmd")
+                con.execute("RELEASE opendoist_cmd")
+            except Exception:
+                pass
             status = {"error": str(exc)}
         sync_status[uuid] = status
         temp_id = cmd.get("temp_id") if ctype == "item_add" else None

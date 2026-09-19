@@ -39,9 +39,27 @@ def _smart_sort(items):
         due = t.get("due") or {}
         dt = due.get("datetime") or due.get("date") or "9999-12-31"
         deadline = (t.get("deadline") or {}).get("date") or "9999-12-31"
-        return (dt, -(t.get("priority", 1)), deadline, t.get("order_key") or "a0")
+        return (dt, -(t.get("priority", 1)), deadline, t.get("order_key") or "a0", t.get("day_order") or 0)
 
     return sorted(items, key=_key)
+
+
+def _day_order_for(con, tid, day):
+    try:
+        r = con.execute("SELECT ord FROM day_orders WHERE task_id=? AND day=?", (tid, day)).fetchone()
+        return r["ord"] if r else 0
+    except Exception:
+        return 0
+
+
+def _with_day_order(con, task_dict, day=None):
+    if day is None:
+        day = datetime.date.today().isoformat()
+    try:
+        task_dict["day_order"] = _day_order_for(con, task_dict.get("id"), day)
+    except Exception:
+        task_dict.setdefault("day_order", 0)
+    return task_dict
 
 
 def _strip_name(name):
@@ -240,13 +258,48 @@ def create_task(body: dict, uid: str = Depends(require_user)):
                 dd_lang = v or "en"
             elif flat == "is_recurring":
                 dd_recur = 1 if v else 0
-    con.execute("INSERT INTO tasks(id,user_id,content,description,project_id,section_id,parent_id,priority,due_date,due_datetime,due_timezone,due_string,due_lang,is_recurring,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-        (tid, uid, body["content"], body.get("description", ""), pid, body.get("section_id"), body.get("parent_id"), body.get("priority", 1), dd_date, dd_dt, dd_tz, dd_str, dd_lang, dd_recur, now, now))
+    # Deadline / duration / assignee passthrough on create (parity with update/sync).
+    dl_date = None
+    if "deadline_date" in body:
+        v = body["deadline_date"]
+        dl_date = None if v is None else _parse_deadline_value(v)
+    elif "deadline" in body:
+        dl = body["deadline"]
+        if dl is None:
+            dl_date = None
+        elif isinstance(dl, dict):
+            d = dl.get("date")
+            dl_date = None if d is None else _parse_deadline_value(d)
+        elif isinstance(dl, str):
+            dl_date = _parse_deadline_value(dl)
+    du_amt, du_unit = None, None
+    if "duration" in body:
+        du = body["duration"]
+        if isinstance(du, dict):
+            du_amt = du.get("amount")
+            if "unit" in du:
+                du_unit = du.get("unit") or "minute"
+        elif isinstance(du, int):
+            du_amt = du
+    if "duration_amount" in body:
+        du_amt = body["duration_amount"]
+    if "duration_unit" in body:
+        du_unit = body["duration_unit"]
+    resp_uid = None
+    for alias in ("responsible_uid", "assignee_id", "assignee"):
+        if body.get(alias) is not None:
+            resp_uid = body.get(alias)
+            break
+    con.execute("INSERT INTO tasks(id,user_id,content,description,project_id,section_id,parent_id,priority,due_date,due_datetime,due_timezone,due_string,due_lang,is_recurring,deadline_date,duration_amount,duration_unit,responsible_uid,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (tid, uid, body["content"], body.get("description", ""), pid, body.get("section_id"), body.get("parent_id"), body.get("priority", 1), dd_date, dd_dt, dd_tz, dd_str, dd_lang, dd_recur, dl_date, du_amt, du_unit, resp_uid, now, now))
     if isinstance(body.get("labels"), list) and body["labels"]:
         _ensure_rest_labels(con, uid, tid, body["labels"])
+    # Support fractional order_key on create for Inbox manual sort seeding.
+    if isinstance(body.get("order_key"), str) and body["order_key"].strip():
+        con.execute("UPDATE tasks SET order_key=? WHERE id=?", (body["order_key"], tid))
     con.commit()
     row = con.execute("SELECT * FROM tasks WHERE id=?", (tid,)).fetchone()
-    return task_to_api(row, _labels(con, tid))
+    return _with_day_order(con, task_to_api(row, _labels(con, tid)))
 
 
 @router.get("/api/v1/tasks")
@@ -258,7 +311,8 @@ def list_tasks(
 ):
     con = _con()
     rows = con.execute("SELECT * FROM tasks WHERE user_id=? AND completed=0 AND is_deleted=0", (uid,)).fetchall()
-    results = [task_to_api(r, _labels(con, r["id"])) for r in rows]
+    today = datetime.date.today().isoformat()
+    results = [_with_day_order(con, task_to_api(r, _labels(con, r["id"])), today) for r in rows]
     if project_id:
         results = [t for t in results if t.get("project_id") == project_id]
     if label:
@@ -281,7 +335,7 @@ def filter_tasks(
     today = datetime.date.today().isoformat()
     now = now_iso()
     rows = con.execute("SELECT * FROM tasks WHERE user_id=? AND completed=0 AND is_deleted=0", (uid,)).fetchall()
-    results = [task_to_api(r, _labels(con, r["id"])) for r in rows]
+    results = [_with_day_order(con, task_to_api(r, _labels(con, r["id"])), today) for r in rows]
     prows = con.execute("SELECT id, name FROM projects WHERE user_id=?", (uid,)).fetchall()
     proj_name_by_id = {r["id"]: r["name"] for r in prows}
     proj_id_by_lower = {r["name"].lower(): r["id"] for r in prows}
@@ -311,7 +365,7 @@ def get_task(tid: str, uid: str = Depends(require_user)):
     r = con.execute("SELECT * FROM tasks WHERE id=? AND user_id=?", (tid, uid)).fetchone()
     if not r or r["is_deleted"]:
         raise HTTPException(404, "not found")
-    return task_to_api(r, _labels(con, tid))
+    return _with_day_order(con, task_to_api(r, _labels(con, tid)))
 
 
 def _parse_deadline_value(v):
@@ -426,7 +480,7 @@ def quick_add(body: dict, request: Request, uid: str = Depends(require_user)):
         )
     con.commit()
     row = con.execute("SELECT * FROM tasks WHERE id=?", (tid,)).fetchone()
-    resp = task_to_api(row, [n for _, n in label_ids])
+    resp = _with_day_order(con, task_to_api(row, [n for _, n in label_ids]))
     if rid:
         con.execute(
             "INSERT OR IGNORE INTO idempotency(key,response) VALUES(?,?)",
@@ -542,6 +596,11 @@ def update_task(tid: str, body: dict, uid: str = Depends(require_user)):
         _set("duration_amount", body["duration_amount"])
     if "duration_unit" in body:
         _set("duration_unit", body["duration_unit"])
+    if "order_key" in body and body["order_key"] is not None:
+        v = body["order_key"]
+        if not isinstance(v, str) or not v.strip():
+            raise HTTPException(400, "invalid order_key")
+        _set("order_key", v)
 
     if sets:
         _set("updated_at", now_iso())
@@ -553,7 +612,7 @@ def update_task(tid: str, body: dict, uid: str = Depends(require_user)):
         _ensure_rest_labels(con, uid, tid, body["labels"])
     con.commit()
     row = con.execute("SELECT * FROM tasks WHERE id=? AND user_id=?", (tid, uid)).fetchone()
-    return task_to_api(row, _labels(con, tid))
+    return _with_day_order(con, task_to_api(row, _labels(con, tid)))
 
 
 @router.post("/api/v1/tasks/{tid}/close")
@@ -570,7 +629,7 @@ def close_task(tid: str, uid: str = Depends(require_user)):
     con.execute("UPDATE tasks SET completed=1,updated_at=? WHERE parent_id=? AND user_id=?", (now, tid, uid))
     con.commit()
     row = con.execute("SELECT * FROM tasks WHERE id=? AND user_id=?", (tid, uid)).fetchone()
-    return task_to_api(row, _labels(con, tid))
+    return _with_day_order(con, task_to_api(row, _labels(con, tid)))
 
 
 @router.post("/api/v1/tasks/{tid}/reopen")
@@ -585,7 +644,7 @@ def reopen_task(tid: str, uid: str = Depends(require_user)):
     con.execute("UPDATE tasks SET completed=0,updated_at=? WHERE id=? AND user_id=?", (now, tid, uid))
     con.commit()
     row = con.execute("SELECT * FROM tasks WHERE id=? AND user_id=?", (tid, uid)).fetchone()
-    return task_to_api(row, _labels(con, tid))
+    return _with_day_order(con, task_to_api(row, _labels(con, tid)))
 
 
 @router.post("/api/v1/tasks/{tid}/move")
@@ -610,13 +669,53 @@ def move_task(tid: str, body: dict | None = None, uid: str = Depends(require_use
     if "parent_id" in body:
         sets.append("parent_id=?")
         vals.append(body.get("parent_id"))
+    if body.get("order_key") is not None:
+        v = body.get("order_key")
+        if not isinstance(v, str) or not v.strip():
+            raise HTTPException(400, "invalid order_key")
+        sets.append("order_key=?")
+        vals.append(v)
     if sets:
         sets.append("updated_at=?")
         vals.append(now_iso())
         con.execute(f"UPDATE tasks SET {','.join(sets)} WHERE id=? AND user_id=?", (*vals, tid, uid))
         con.commit()
     row = con.execute("SELECT * FROM tasks WHERE id=? AND user_id=?", (tid, uid)).fetchone()
-    return task_to_api(row, _labels(con, tid))
+    return _with_day_order(con, task_to_api(row, _labels(con, tid)))
+
+
+@router.post("/api/v1/tasks/{tid}/duplicate")
+def duplicate_task(tid: str, uid: str = Depends(require_user)):
+    # Duplicate without comments/reminders: copy content/description/project/
+    # priority/labels/due/deadline/duration/section/responsible/parent only.
+    if tid.startswith("tmp-"):
+        raise HTTPException(400, "Non-base32 digit found: tmp placeholder not valid")
+    con = _con()
+    r = con.execute("SELECT * FROM tasks WHERE id=? AND user_id=?", (tid, uid)).fetchone()
+    if not r or r["is_deleted"]:
+        raise HTTPException(404, "not found")
+    nid = new_id()
+    now = now_iso()
+    con.execute(
+        "INSERT INTO tasks(id,user_id,content,description,project_id,section_id,parent_id,"
+        "priority,due_date,due_datetime,due_timezone,due_string,due_lang,is_recurring,"
+        "deadline_date,duration_amount,duration_unit,responsible_uid,order_key,created_at,updated_at)"
+        " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (
+            nid, uid, r["content"], r["description"] or "", r["project_id"],
+            r["section_id"], r["parent_id"], r["priority"],
+            r["due_date"], r["due_datetime"], r["due_timezone"], r["due_string"],
+            r["due_lang"] or "en", r["is_recurring"] or 0,
+            r["deadline_date"], r["duration_amount"], r["duration_unit"],
+            r["responsible_uid"], r["order_key"] or "a0", now, now,
+        ),
+    )
+    for (lid,) in con.execute("SELECT label_id FROM task_labels WHERE task_id=?", (tid,)).fetchall():
+        con.execute("INSERT OR IGNORE INTO task_labels(task_id,label_id) VALUES(?,?)", (nid, lid))
+    # Explicitly no comments/reminders copy: reminders table untouched for nid.
+    con.commit()
+    row = con.execute("SELECT * FROM tasks WHERE id=? AND user_id=?", (nid, uid)).fetchone()
+    return _with_day_order(con, task_to_api(row, _labels(con, nid)))
 
 
 @router.delete("/api/v1/tasks/{tid}")
