@@ -19,3 +19,5 @@ def health():
 
 from app.api_tasks import router as tasks_router
 app.include_router(tasks_router)
+from app.sync import router as sync_router
+app.include_router(sync_router)

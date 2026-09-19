@@ -1,6 +1,7 @@
 import datetime
 import json
 import os
+import re
 from fastapi import APIRouter, Depends, HTTPException, Request
 from app.auth import require_user
 from app.db import SCHEMA, get_db
@@ -33,6 +34,101 @@ def _labels(con, tid):
     return [x[0] for x in con.execute("SELECT l.name FROM labels l JOIN task_labels t ON t.label_id=l.id WHERE t.task_id=?", (tid,))]
 
 
+def _smart_sort(items):
+    def _key(t):
+        due = t.get("due") or {}
+        dt = due.get("datetime") or due.get("date") or "9999-12-31"
+        deadline = (t.get("deadline") or {}).get("date") or "9999-12-31"
+        return (dt, -(t.get("priority", 1)), deadline, t.get("order_key") or "a0")
+
+    return sorted(items, key=_key)
+
+
+def _strip_name(name):
+    return name.rstrip(",.;:!?)").strip()
+
+
+def _parse_branch(branch):
+    projects, labels, pris = [], [], set()
+    spans = []
+    for mm in re.finditer(r'#(?:"([^"]+)"|\'([^\']+)\'|(\S+))', branch):
+        name = mm.group(1) or mm.group(2) or mm.group(3)
+        projects.append(_strip_name(name))
+        spans.append(mm.span())
+    for mm in re.finditer(r'[@%](\S+)', branch):
+        labels.append(_strip_name(mm.group(1)))
+        spans.append(mm.span())
+    for mm in re.finditer(r'\bp([1-4])\b', branch, flags=re.IGNORECASE):
+        pris.add(5 - int(mm.group(1)))
+        spans.append(mm.span())
+    for pat in (r'\btoday\b', r'\boverdue\b', r'\binbox\b'):
+        for mm in re.finditer(pat, branch, flags=re.IGNORECASE):
+            spans.append(mm.span())
+    chars = list(branch)
+    for s, e in sorted(spans, key=lambda x: x[0], reverse=True):
+        for i in range(s, e):
+            chars[i] = " "
+    rest = re.sub(r"\s+", " ", "".join(chars)).strip()
+    texts = [w for w in rest.split(" ") if w]
+    return {
+        "today": bool(re.search(r'\btoday\b', branch, flags=re.IGNORECASE)),
+        "overdue": bool(re.search(r'\boverdue\b', branch, flags=re.IGNORECASE)),
+        "inbox": bool(re.search(r'\binbox\b', branch, flags=re.IGNORECASE)),
+        "projects": [p for p in projects if p],
+        "labels": [l for l in labels if l],
+        "priorities": pris,
+        "texts": texts,
+    }
+
+
+def _branch_matches(task, proj_name_by_id, proj_id_by_lower, branch, today, now):
+    if branch["today"]:
+        due = task.get("due") or {}
+        dd = due.get("date")
+        dt = due.get("datetime") or ""
+        if not ((dd == today) or (dt and dt[:10] == today)):
+            return False
+    if branch["overdue"]:
+        due = task.get("due") or {}
+        dd = due.get("date") or ""
+        dt = due.get("datetime") or ""
+        is_over = False
+        if dd and dd < today:
+            is_over = True
+        if dt and dt < now:
+            is_over = True
+        if not is_over:
+            return False
+    if branch["inbox"] and task.get("project_id") != "inbox":
+        return False
+    if branch["projects"]:
+        want = set()
+        for name in branch["projects"]:
+            # Exact name match first, then case-insensitive.
+            pid = None
+            for pid_c, nm in proj_name_by_id.items():
+                if nm == name:
+                    pid = pid_c
+                    break
+            if pid is None:
+                pid = proj_id_by_lower.get(name.lower())
+            if pid is not None:
+                want.add(pid)
+        if not want or task.get("project_id") not in want:
+            return False
+    if branch["labels"]:
+        have = {str(x).lower() for x in (task.get("labels") or [])}
+        if not all(str(l).lower() in have for l in branch["labels"]):
+            return False
+    if branch["priorities"] and task.get("priority") not in branch["priorities"]:
+        return False
+    if branch["texts"]:
+        content = str(task.get("content") or "").lower()
+        if not all(w.lower() in content for w in branch["texts"]):
+            return False
+    return True
+
+
 @router.post("/api/v1/tasks")
 def create_task(body: dict, uid: str = Depends(require_user)):
     if not body.get("content"):
@@ -49,10 +145,57 @@ def create_task(body: dict, uid: str = Depends(require_user)):
 
 
 @router.get("/api/v1/tasks")
-def list_tasks(uid: str = Depends(require_user)):
+def list_tasks(
+    uid: str = Depends(require_user),
+    project_id: str | None = None,
+    label: str | None = None,
+    limit: int | None = None,
+):
     con = _con()
     rows = con.execute("SELECT * FROM tasks WHERE user_id=? AND completed=0 AND is_deleted=0", (uid,)).fetchall()
-    return {"results": [task_to_api(r, _labels(con, r["id"])) for r in rows]}
+    results = [task_to_api(r, _labels(con, r["id"])) for r in rows]
+    if project_id:
+        results = [t for t in results if t.get("project_id") == project_id]
+    if label:
+        want = label.lstrip("@%").lower()
+        results = [t for t in results if any(str(x).lower() == want for x in (t.get("labels") or []))]
+    results = _smart_sort(results)
+    if limit is not None and limit >= 0:
+        results = results[:limit]
+    return {"results": results}
+
+
+# NOTE: registered BEFORE /tasks/{tid} so "filter" is not captured as tid.
+@router.get("/api/v1/tasks/filter")
+def filter_tasks(
+    uid: str = Depends(require_user),
+    query: str = "",
+    limit: int | None = None,
+):
+    con = _con()
+    today = datetime.date.today().isoformat()
+    now = now_iso()
+    rows = con.execute("SELECT * FROM tasks WHERE user_id=? AND completed=0 AND is_deleted=0", (uid,)).fetchall()
+    results = [task_to_api(r, _labels(con, r["id"])) for r in rows]
+    prows = con.execute("SELECT id, name FROM projects WHERE user_id=?", (uid,)).fetchall()
+    proj_name_by_id = {r["id"]: r["name"] for r in prows}
+    proj_id_by_lower = {r["name"].lower(): r["id"] for r in prows}
+    q = (query or "").strip()
+    if q:
+        branches = [_parse_branch(b) for b in q.split("|")]
+        # A branch with zero conditions matches everything (avoids empty-OR trap).
+        results = [
+            t for t in results
+            if any(
+                (not b["today"] and not b["overdue"] and not b["inbox"] and not b["projects"] and not b["labels"] and not b["priorities"] and not b["texts"])
+                or _branch_matches(t, proj_name_by_id, proj_id_by_lower, b, today, now)
+                for b in branches
+            )
+        ]
+    results = _smart_sort(results)
+    if limit is not None and limit >= 0:
+        results = results[:limit]
+    return {"results": results}
 
 
 @router.get("/api/v1/tasks/{tid}")
