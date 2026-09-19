@@ -204,9 +204,48 @@ def get_task(tid: str, uid: str = Depends(require_user)):
         raise HTTPException(400, "Non-base32 digit found: tmp placeholder not valid")
     con = _con()
     r = con.execute("SELECT * FROM tasks WHERE id=? AND user_id=?", (tid, uid)).fetchone()
-    if not r:
+    if not r or r["is_deleted"]:
         raise HTTPException(404, "not found")
     return task_to_api(r, _labels(con, tid))
+
+
+def _parse_deadline_value(v):
+    if v is None:
+        return None
+    s = str(v).strip()
+    low = s.lower()
+    today = datetime.date.today()
+    if low == "today":
+        return today.isoformat()
+    if low == "tomorrow":
+        return (today + datetime.timedelta(days=1)).isoformat()
+    if low in ("next week", "next_week", "nextweek"):
+        return (today + datetime.timedelta(days=7)).isoformat()
+    try:
+        return datetime.date.fromisoformat(s).isoformat()
+    except (ValueError, TypeError):
+        raise HTTPException(400, f"invalid deadline_date: {v!r} (expected Today|Tomorrow|Next week|YYYY-MM-DD)")
+
+
+def _ensure_rest_labels(con, uid, tid, labels):
+    for entry in labels or []:
+        name = str(entry)
+        row = con.execute(
+            "SELECT id FROM labels WHERE id=? AND user_id=? AND is_deleted=0", (name, uid)
+        ).fetchone()
+        if row:
+            lid = row["id"]
+        else:
+            lrow = con.execute(
+                "SELECT id FROM labels WHERE name=? AND user_id=? AND is_deleted=0",
+                (name, uid),
+            ).fetchone()
+            if lrow:
+                lid = lrow["id"]
+            else:
+                lid = new_id()
+                con.execute("INSERT INTO labels(id,user_id,name) VALUES(?,?,?)", (lid, uid, name))
+        con.execute("INSERT OR IGNORE INTO task_labels(task_id,label_id) VALUES(?,?)", (tid, lid))
 
 
 # Stubs filled in by later tasks (Task 5/8); pinned tests only cover
@@ -293,25 +332,196 @@ def quick_add(body: dict, request: Request, uid: str = Depends(require_user)):
 
 
 @router.post("/api/v1/tasks/{tid}")
-def update_task(tid: str, uid: str = Depends(require_user)):
-    raise HTTPException(501, "not implemented")
+def update_task(tid: str, body: dict, uid: str = Depends(require_user)):
+    if tid.startswith("tmp-"):
+        raise HTTPException(400, "Non-base32 digit found: tmp placeholder not valid")
+    if not isinstance(body, dict):
+        raise HTTPException(400, "invalid body")
+    con = _con()
+    r = con.execute("SELECT * FROM tasks WHERE id=? AND user_id=?", (tid, uid)).fetchone()
+    if not r or r["is_deleted"]:
+        raise HTTPException(404, "not found")
+    sets, vals = [], []
+
+    def _set(col, val):
+        sets.append(f"{col}=?")
+        vals.append(val)
+
+    if "content" in body:
+        v = body["content"]
+        if v is None or (isinstance(v, str) and not v.strip()):
+            raise HTTPException(400, "content required")
+        _set("content", v)
+    if "description" in body:
+        v = body["description"]
+        _set("description", "" if v is None else v)
+    if "project_id" in body and body["project_id"] is not None:
+        _set("project_id", body["project_id"])
+    if "section_id" in body:
+        _set("section_id", body.get("section_id"))
+    if "parent_id" in body:
+        _set("parent_id", body.get("parent_id"))
+    if "priority" in body and body["priority"] is not None:
+        try:
+            _set("priority", int(body["priority"]))
+        except (ValueError, TypeError):
+            raise HTTPException(400, "invalid priority")
+    for alias in ("responsible_uid", "assignee_id", "assignee"):
+        if alias in body and body[alias] is not None:
+            _set("responsible_uid", body[alias])
+            break
+    # Deadline: flat deadline_date or nested deadline dict.
+    if "deadline_date" in body:
+        v = body["deadline_date"]
+        _set("deadline_date", None if v is None else _parse_deadline_value(v))
+    elif "deadline" in body:
+        dl = body["deadline"]
+        if dl is None:
+            _set("deadline_date", None)
+        elif isinstance(dl, dict):
+            d = dl.get("date")
+            _set("deadline_date", None if d is None else _parse_deadline_value(d))
+        elif isinstance(dl, str):
+            _set("deadline_date", _parse_deadline_value(dl))
+        else:
+            raise HTTPException(400, "invalid deadline")
+    # Due: nested dict merges (only provided keys), flat due_* keys update directly.
+    if "due" in body:
+        due = body["due"]
+        if due is None:
+            sets.append("due_date=NULL,due_datetime=NULL,due_timezone=NULL,due_string=NULL,due_lang='en',is_recurring=0")
+        elif isinstance(due, dict):
+            if "date" in due:
+                _set("due_date", due["date"])
+            if "datetime" in due:
+                _set("due_datetime", due["datetime"])
+            if "timezone" in due:
+                _set("due_timezone", due["timezone"])
+            if "string" in due:
+                _set("due_string", due["string"])
+            if "lang" in due:
+                _set("due_lang", due["lang"] or "en")
+            if "is_recurring" in due:
+                _set("is_recurring", 1 if due["is_recurring"] else 0)
+        else:
+            raise HTTPException(400, "invalid due")
+    for flat, col in (
+        ("due_date", "due_date"),
+        ("due_datetime", "due_datetime"),
+        ("due_timezone", "due_timezone"),
+        ("due_string", "due_string"),
+        ("due_lang", "due_lang"),
+        ("is_recurring", "is_recurring"),
+    ):
+        if flat in body:
+            v = body[flat]
+            if flat == "is_recurring":
+                _set(col, 1 if v else 0)
+            else:
+                _set(col, v)
+    # Duration: dict or flat keys.
+    if "duration" in body:
+        du = body["duration"]
+        if du is None:
+            sets.append("duration_amount=NULL,duration_unit=NULL")
+        elif isinstance(du, dict):
+            if "amount" in du:
+                _set("duration_amount", du["amount"])
+            if "unit" in du:
+                _set("duration_unit", du["unit"] or "minute")
+        elif isinstance(du, int):
+            _set("duration_amount", du)
+        else:
+            raise HTTPException(400, "invalid duration")
+    if "duration_amount" in body:
+        _set("duration_amount", body["duration_amount"])
+    if "duration_unit" in body:
+        _set("duration_unit", body["duration_unit"])
+
+    if sets:
+        _set("updated_at", now_iso())
+        con.execute(f"UPDATE tasks SET {','.join(sets)} WHERE id=? AND user_id=?", (*vals, tid, uid))
+    if "labels" in body and body["labels"] is not None:
+        if not isinstance(body["labels"], list):
+            raise HTTPException(400, "invalid labels")
+        con.execute("DELETE FROM task_labels WHERE task_id=?", (tid,))
+        _ensure_rest_labels(con, uid, tid, body["labels"])
+    con.commit()
+    row = con.execute("SELECT * FROM tasks WHERE id=? AND user_id=?", (tid, uid)).fetchone()
+    return task_to_api(row, _labels(con, tid))
 
 
 @router.post("/api/v1/tasks/{tid}/close")
 def close_task(tid: str, uid: str = Depends(require_user)):
-    raise HTTPException(501, "not implemented")
+    if tid.startswith("tmp-"):
+        raise HTTPException(400, "Non-base32 digit found: tmp placeholder not valid")
+    con = _con()
+    r = con.execute("SELECT * FROM tasks WHERE id=? AND user_id=?", (tid, uid)).fetchone()
+    if not r or r["is_deleted"]:
+        raise HTTPException(404, "not found")
+    now = now_iso()
+    con.execute("UPDATE tasks SET completed=1,updated_at=? WHERE id=? AND user_id=?", (now, tid, uid))
+    # Hide direct children as well; no recurrence expansion (no fake recurrence).
+    con.execute("UPDATE tasks SET completed=1,updated_at=? WHERE parent_id=? AND user_id=?", (now, tid, uid))
+    con.commit()
+    row = con.execute("SELECT * FROM tasks WHERE id=? AND user_id=?", (tid, uid)).fetchone()
+    return task_to_api(row, _labels(con, tid))
 
 
 @router.post("/api/v1/tasks/{tid}/reopen")
 def reopen_task(tid: str, uid: str = Depends(require_user)):
-    raise HTTPException(501, "not implemented")
+    if tid.startswith("tmp-"):
+        raise HTTPException(400, "Non-base32 digit found: tmp placeholder not valid")
+    con = _con()
+    r = con.execute("SELECT * FROM tasks WHERE id=? AND user_id=?", (tid, uid)).fetchone()
+    if not r or r["is_deleted"]:
+        raise HTTPException(404, "not found")
+    now = now_iso()
+    con.execute("UPDATE tasks SET completed=0,updated_at=? WHERE id=? AND user_id=?", (now, tid, uid))
+    con.commit()
+    row = con.execute("SELECT * FROM tasks WHERE id=? AND user_id=?", (tid, uid)).fetchone()
+    return task_to_api(row, _labels(con, tid))
 
 
 @router.post("/api/v1/tasks/{tid}/move")
-def move_task(tid: str, uid: str = Depends(require_user)):
-    raise HTTPException(501, "not implemented")
+def move_task(tid: str, body: dict | None = None, uid: str = Depends(require_user)):
+    if tid.startswith("tmp-"):
+        raise HTTPException(400, "Non-base32 digit found: tmp placeholder not valid")
+    if body is None:
+        body = {}
+    if not isinstance(body, dict):
+        raise HTTPException(400, "invalid body")
+    con = _con()
+    r = con.execute("SELECT * FROM tasks WHERE id=? AND user_id=?", (tid, uid)).fetchone()
+    if not r or r["is_deleted"]:
+        raise HTTPException(404, "not found")
+    sets, vals = [], []
+    if body.get("project_id"):
+        sets.append("project_id=?")
+        vals.append(body["project_id"])
+    if "section_id" in body:
+        sets.append("section_id=?")
+        vals.append(body.get("section_id"))
+    if "parent_id" in body:
+        sets.append("parent_id=?")
+        vals.append(body.get("parent_id"))
+    if sets:
+        sets.append("updated_at=?")
+        vals.append(now_iso())
+        con.execute(f"UPDATE tasks SET {','.join(sets)} WHERE id=? AND user_id=?", (*vals, tid, uid))
+        con.commit()
+    row = con.execute("SELECT * FROM tasks WHERE id=? AND user_id=?", (tid, uid)).fetchone()
+    return task_to_api(row, _labels(con, tid))
 
 
 @router.delete("/api/v1/tasks/{tid}")
 def delete_task(tid: str, uid: str = Depends(require_user)):
-    raise HTTPException(501, "not implemented")
+    if tid.startswith("tmp-"):
+        raise HTTPException(400, "Non-base32 digit found: tmp placeholder not valid")
+    con = _con()
+    r = con.execute("SELECT * FROM tasks WHERE id=? AND user_id=?", (tid, uid)).fetchone()
+    if not r:
+        raise HTTPException(404, "not found")
+    con.execute("UPDATE tasks SET is_deleted=1,updated_at=? WHERE id=? AND user_id=?", (now_iso(), tid, uid))
+    con.commit()
+    return {"ok": True}
