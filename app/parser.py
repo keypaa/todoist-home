@@ -3,6 +3,7 @@ import re
 import datetime
 
 from app import nlp
+import app.nlp.en  # noqa: F401 — ensure EN module registered in nlp.LANGUAGES
 from app.nlp.base import extract_tokens
 
 DATES = {"today": 0, "tomorrow": 1, "next week": 7}
