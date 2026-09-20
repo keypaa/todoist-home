@@ -12,3 +12,9 @@ try:
     LANGUAGES["en"] = _en_mod
 except ImportError:
     pass
+
+try:
+    from app.nlp import fr as _fr_mod
+    LANGUAGES["fr"] = _fr_mod
+except ImportError:
+    pass
