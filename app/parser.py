@@ -43,37 +43,19 @@ def parse_quick_add(text, today_iso):
 
     t = text
 
-    tok = extract_tokens(t)
-    project, labels, section, priority = tok["project"], tok["labels"], tok["section"], tok["priority"]
-    spans = list(tok["spans"])
-
     # Registry lookup (no behavior change yet: EN fallback when unregistered)
     lang = nlp.detect(text)
     mod = nlp.LANGUAGES.get(lang)
     base = datetime.date.fromisoformat(today_iso)
     if mod is not None and hasattr(mod, "find_dates"):
         found = mod.find_dates(t, base)
-        due_date, due_dt = found["due_date"], found["due_datetime"]
-        spans.extend(found["spans"])
     else:
         found = find_dates(t, base)
-        due_date, due_dt = found["due_date"], found["due_datetime"]
-        spans.extend(found["spans"])
+    due_date, due_dt = found["due_date"], found["due_datetime"]
 
-    # Remove token spans from content (reverse order to keep offsets valid)
-    content_parts = t
-    # Apply removals by replacing spans with spaces
-    # Sort spans by start descending
-    chars = list(t)
-    for s, e in sorted(spans, key=lambda x: x[0], reverse=True):
-        for i in range(s, e):
-            chars[i] = " "
-    content_parts = "".join(chars)
-    content_parts = re.sub(r"\s+", " ", content_parts).strip()
-    content_parts = (
-        content_parts.replace("\\#", "#").replace("\\@", "@").replace("\\%", "%").replace("\\/", "/")
-    )
-    content = content_parts or text.strip()
+    tok = extract_tokens(t, extra_spans=found["spans"])
+    project, labels, section, priority = tok["project"], tok["labels"], tok["section"], tok["priority"]
+    content = tok["cleaned"] or text.strip()
 
     return {
         "content": content,
