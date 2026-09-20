@@ -1,6 +1,9 @@
-"""EN quick-add parser for OpenDoist V1 (Task 3)."""
+"""EN quick-add parser for OpenDoist V1 (Task 3) — thin wrapper over app.nlp."""
 import re
 import datetime
+
+from app import nlp
+from app.nlp.base import extract_tokens
 
 DATES = {"today": 0, "tomorrow": 1, "next week": 7}
 
@@ -9,39 +12,12 @@ def _strip_trailing_punct(name: str) -> str:
     return name.rstrip(",.;:!?)")
 
 
-def parse_quick_add(text, today_iso):
-    labels, project, section, priority = [], None, None, 1
-    assignee, reminder, deadline = None, None, None
-
-    t = text
-
-    spans = []
-
-    m = re.search(r"\bp([1-4])\b", t)
-    if m:
-        priority = 5 - int(m.group(1))
-        spans.append(m.span())
-
-    # #project incl quoted ("..." or '...')
-    for mm in re.finditer(r'(?<!\\)#(?:"([^"]+)"|\'([^\']+)\'|(\S+))', t):
-        name = mm.group(1) or mm.group(2) or mm.group(3)
-        project = _strip_trailing_punct(name)
-        spans.append(mm.span())
-
-    # @ / % labels
-    for mm in re.finditer(r'(?<!\\)[@%](\S+)', t):
-        labels.append(_strip_trailing_punct(mm.group(1)))
-        spans.append(mm.span())
-
-    # /section (require token start at whitespace or string start to avoid URLs)
-    for mm in re.finditer(r'(?<!\\)(?:(?<=\s)|^)/(\S+)', t):
-        section = _strip_trailing_punct(mm.group(1))
-        spans.append(mm.span())
-
+def find_dates(text, today):
     # EN dates (case-insensitive, word boundaries)
+    t = text
     low = text.lower()
     due_date, due_dt = None, None
-    base = datetime.date.fromisoformat(today_iso)
+    base = today
     date_spans = []
     for pat in (r"\bnext\s+monday\b", r"\btomorrow\b", r"\btoday\b", r"\bnext\s+week\b"):
         for mm in re.finditer(pat, t, flags=re.IGNORECASE):
@@ -59,7 +35,30 @@ def parse_quick_add(text, today_iso):
         due_date = str(base)
     elif "next week" in low:
         due_date = str(base + datetime.timedelta(days=7))
-    spans.extend(date_spans)
+    return {"due_date": due_date, "due_datetime": due_dt, "spans": date_spans}
+
+
+def parse_quick_add(text, today_iso):
+    assignee, reminder, deadline = None, None, None
+
+    t = text
+
+    tok = extract_tokens(t)
+    project, labels, section, priority = tok["project"], tok["labels"], tok["section"], tok["priority"]
+    spans = list(tok["spans"])
+
+    # Registry lookup (no behavior change yet: EN fallback when unregistered)
+    lang = nlp.detect(text)
+    mod = nlp.LANGUAGES.get(lang)
+    base = datetime.date.fromisoformat(today_iso)
+    if mod is not None and hasattr(mod, "find_dates"):
+        found = mod.find_dates(t, base)
+        due_date, due_dt = found["due_date"], found["due_datetime"]
+        spans.extend(found["spans"])
+    else:
+        found = find_dates(t, base)
+        due_date, due_dt = found["due_date"], found["due_datetime"]
+        spans.extend(found["spans"])
 
     # Remove token spans from content (reverse order to keep offsets valid)
     content_parts = t
