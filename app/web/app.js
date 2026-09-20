@@ -16,6 +16,25 @@ function toast(msg, isErr) {
   setTimeout(() => d.remove(), 3200);
 }
 
+let pendingDeleteAction = null;
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+}
+
+function openDeleteConfirm({ title, bodyHTML, onConfirm }) {
+  document.getElementById("delete-modal-title").textContent = title;
+  document.getElementById("delete-modal-body").innerHTML = bodyHTML;
+  pendingDeleteAction = onConfirm || null;
+  document.getElementById("delete-modal").classList.remove("hidden");
+  setTimeout(() => document.getElementById("delete-cancel").focus(), 30);
+}
+
+function closeDeleteModal() {
+  document.getElementById("delete-modal").classList.add("hidden");
+  pendingDeleteAction = null;
+}
+
 async function api(path, opts = {}) {
   const r = await fetch(API + path, {
     ...opts,
@@ -120,13 +139,18 @@ function taskRow(t) {
   eb.onclick = () => openEdit(t);
   const db = document.createElement("button");
   db.textContent = "Delete";
-  db.onclick = async () => {
-    if (!confirm("Delete '" + t.content + "'?")) return;
-    try {
-      await api("/tasks/" + t.id, { method: "DELETE" });
-      toast("Task deleted");
-      reload();
-    } catch (e) { toast("Delete failed (/tasks/" + t.id + "): " + e.message, true); }
+  db.onclick = () => {
+    openDeleteConfirm({
+      title: "Delete task?",
+      bodyHTML: "The &ldquo;<b>" + escapeHtml(t.content) + "</b>&rdquo; task will be permanently deleted. This action cannot be undone.",
+      onConfirm: async () => {
+        try {
+          await api("/tasks/" + t.id, { method: "DELETE" });
+          toast("Task deleted");
+          reload();
+        } catch (e) { toast("Delete failed (/tasks/" + t.id + "): " + e.message, true); }
+      },
+    });
   };
   acts.appendChild(eb);
   acts.appendChild(db);
@@ -326,11 +350,20 @@ async function handleProjectMenuAction(p, action) {
       }
       loadProjects();
     } else if (action === "delete") {
-      if (!confirm("Delete '" + p.name + "'?")) return;
-      await api("/projects/" + p.id, { method: "DELETE" });
-      toast("Project deleted");
-      if (activeProject === p.id) setView("today");
-      else loadProjects();
+      openDeleteConfirm({
+        title: "Delete project?",
+        bodyHTML: "The <b>" + escapeHtml(p.name) + "</b> project and all its tasks will be permanently deleted. This action cannot be undone.",
+        onConfirm: async () => {
+          try {
+            await api("/projects/" + p.id, { method: "DELETE" });
+            toast("Project deleted");
+            if (activeProject === p.id) setView("today");
+            else loadProjects();
+          } catch (e) {
+            toast("Project action failed (/projects/" + p.id + "): " + e.message, true);
+          }
+        },
+      });
     } else if (["save-template", "apply-template", "comments", "activity", "extensions", "manage-data"].includes(action)) {
       const labels = {
         "save-template": "Save as template",
@@ -647,6 +680,16 @@ document.addEventListener("DOMContentLoaded", () => {
   );
   document.getElementById("project-submit").onclick = submitProjectModal;
   pm.addEventListener("click", (e) => { if (e.target === pm) closeProjectModal(); });
+
+  const dm = document.getElementById("delete-modal");
+  document.getElementById("delete-cancel").onclick = closeDeleteModal;
+  document.getElementById("delete-confirm").onclick = async () => {
+    const fn = pendingDeleteAction;
+    pendingDeleteAction = null;
+    dm.classList.add("hidden");
+    if (fn) await fn();
+  };
+  dm.addEventListener("click", (e) => { if (e.target === dm) closeDeleteModal(); });
 
   document.addEventListener("click", (e) => {
     if (!e.target.closest || !e.target.closest(".proj-row")) closeAllProjectMenus();
