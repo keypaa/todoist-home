@@ -1,8 +1,19 @@
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
+from pathlib import Path
 from app.db import init_db
 app = FastAPI(title="OpenDoist")
 init_db()
+
+WEB_DIR = Path(__file__).parent / "web"
+if WEB_DIR.exists():
+    app.mount("/static", StaticFiles(directory=str(WEB_DIR)), name="static")
+
+
+@app.get("/", include_in_schema=False)
+def index():
+    return FileResponse(str(WEB_DIR / "index.html"))
 
 
 @app.exception_handler(HTTPException)

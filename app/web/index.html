@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<meta name="theme-color" content="#E44332" />
+<title>OpenDoist — Today</title>
+<link rel="stylesheet" href="/static/styles.css" />
+<!-- brand red #E44332 -->
+</head>
+<body>
+<div id="app">
+  <aside id="sidebar">
+    <div class="user-row">
+      <div class="avatar">O</div>
+      <div class="user-name">OpenDoist</div>
+      <div class="user-icons"><span title="Notifications">🔔</span><span title="Sidebar">◫</span></div>
+    </div>
+    <button id="nav-add" class="add-task-btn"><span class="plus">＋</span> Add task</button>
+    <div class="search-row">
+      <span class="icon">⌕</span>
+      <input id="search-input" type="text" placeholder="Search" autocomplete="off" />
+    </div>
+    <nav id="main-nav">
+      <button class="nav-item" data-view="inbox"><span class="icon">📥</span> Inbox <span class="count" id="count-inbox"></span></button>
+      <button class="nav-item active" data-view="today"><span class="icon">📅</span> Today <span class="count" id="count-today"></span></button>
+      <button class="nav-item" data-view="upcoming"><span class="icon">🗓️</span> Upcoming</button>
+      <button class="nav-item" data-view="filters"><span class="icon">▦</span> Filters &amp; Labels</button>
+    </nav>
+    <div class="projects-head">
+      <span>My Projects</span>
+      <button id="add-project-btn" title="Add project">＋</button>
+    </div>
+    <div id="project-list"></div>
+    <div class="side-foot">
+      <button class="nav-item small" id="smart-sort-info" title="Smart sort order: due date, priority, deadline">ⓘ Smart sort</button>
+    </div>
+  </aside>
+  <main id="main">
+    <div id="view-head">
+      <h1 id="view-title">Today</h1>
+      <div class="view-controls">
+        <label class="sort-label">Display
+          <select id="sort-select">
+            <option value="smart" selected>Smart</option>
+            <option value="date">Date</option>
+            <option value="priority">Priority</option>
+          </select>
+        </label>
+      </div>
+    </div>
+    <div id="task-groups"></div>
+    <button id="inline-add" class="inline-add"><span class="plus">＋</span> Add task</button>
+    <footer id="disclaimer">OpenDoist V1 — local Todoist-like clone for personal use. Not affiliated with Doist. Data stays in your local SQLite DB.</footer>
+  </main>
+</div>
+
+<div id="quick-modal" class="modal hidden">
+  <div class="modal-card">
+    <input id="quick-input" type="text" placeholder="Task name — try 'Buy milk tomorrow #Shopping @errands p1'" autocomplete="off" />
+    <div class="chips">
+      <button class="chip" data-add=" today">Today</button>
+      <button class="chip" data-add=" tomorrow">Tomorrow</button>
+      <button class="chip" data-add=" #Inbox">Inbox</button>
+      <button class="chip" data-add=" @home">🏷 home</button>
+      <button class="chip" data-add=" p1">P1</button>
+      <button class="chip" data-add=" p2">P2</button>
+      <button class="chip" data-add=" p3">P3</button>
+    </div>
+    <div class="modal-actions">
+      <span class="hint">Draft auto-saved locally</span>
+      <span style="flex:1"></span>
+      <button id="quick-cancel" class="btn">Cancel</button>
+      <button id="quick-submit" class="btn primary">Add task</button>
+    </div>
+  </div>
+</div>
+
+<div id="edit-modal" class="modal hidden">
+  <div class="modal-card">
+    <h3>Edit task</h3>
+    <input id="edit-input" type="text" />
+    <div class="modal-actions">
+      <span style="flex:1"></span>
+      <button id="edit-cancel" class="btn">Cancel</button>
+      <button id="edit-submit" class="btn primary">Save</button>
+    </div>
+  </div>
+</div>
+
+<div id="project-modal" class="modal hidden">
+  <div class="modal-card">
+    <h3>Add project</h3>
+    <input id="project-input" type="text" placeholder="Project name, e.g. Shopping" />
+    <div class="modal-actions">
+      <span style="flex:1"></span>
+      <button id="project-cancel" class="btn">Cancel</button>
+      <button id="project-submit" class="btn primary">Add</button>
+    </div>
+  </div>
+</div>
+
+<div id="toasts"></div>
+<script src="/static/app.js"></script>
+</body>
+</html>
