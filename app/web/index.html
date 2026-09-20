@@ -89,9 +89,65 @@
 </div>
 
 <div id="project-modal" class="modal hidden">
-  <div class="modal-card">
-    <h3>Add project</h3>
-    <input id="project-input" type="text" placeholder="Project name, e.g. Shopping" />
+  <div class="modal-card project-card">
+    <div class="proj-modal-head">
+      <h3 id="project-modal-title">Add project <span class="help" title="Projects group related tasks">?</span></h3>
+      <button id="project-x" class="x-btn" title="Close">✕</button>
+    </div>
+    <label class="fld-label" for="project-input">Name</label>
+    <div class="name-wrap">
+      <input id="project-input" type="text" placeholder="Project name, e.g. Shopping" maxlength="120" autocomplete="off" />
+      <span id="project-name-count">0/120</span>
+    </div>
+    <label class="fld-label" for="project-desc">Description</label>
+    <textarea id="project-desc" placeholder="Add a description"></textarea>
+    <label class="fld-label" for="project-color">Color</label>
+    <select id="project-color">
+      <option value="berry_red">Berry Red</option>
+      <option value="red">Red</option>
+      <option value="orange">Orange</option>
+      <option value="yellow">Yellow</option>
+      <option value="olive_green">Olive Green</option>
+      <option value="lime_green">Lime Green</option>
+      <option value="green">Green</option>
+      <option value="mint_green">Mint Green</option>
+      <option value="teal">Teal</option>
+      <option value="sky_blue">Sky Blue</option>
+      <option value="light_blue">Light Blue</option>
+      <option value="blue">Blue</option>
+      <option value="grape">Grape</option>
+      <option value="violet">Violet</option>
+      <option value="lavender">Lavender</option>
+      <option value="magenta">Magenta</option>
+      <option value="salmon">Salmon</option>
+      <option value="charcoal" selected>Charcoal</option>
+      <option value="grey">Grey</option>
+      <option value="taupe">Taupe</option>
+    </select>
+    <label class="fld-label" for="project-workspace">Workspace</label>
+    <select id="project-workspace">
+      <option value="My Projects" selected>My Projects</option>
+    </select>
+    <label class="fld-label" for="project-parent">Parent project</label>
+    <select id="project-parent">
+      <option value="">No Parent</option>
+    </select>
+    <label class="fld-label" for="project-access">Access</label>
+    <select id="project-access">
+      <option value="Restricted" selected>Restricted</option>
+      <option value="Shared">Shared</option>
+    </select>
+    <label class="fav-row" for="project-fav">
+      <button type="button" id="project-fav-toggle" class="fav-toggle" role="switch" aria-checked="false" aria-label="Add to favorites"></button>
+      <input type="checkbox" id="project-fav" class="hidden-checkbox" />
+      <span>Add to favorites</span>
+    </label>
+    <span class="fld-label">Layout</span>
+    <div id="project-layout" class="layout-picker" role="radiogroup" aria-label="Layout">
+      <button type="button" class="layout-btn active" data-layout="list" role="radio" aria-checked="true"><span class="layout-icon"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M2 4h12M2 8h12M2 12h12"/></svg></span>List</button>
+      <button type="button" class="layout-btn" data-layout="board" role="radio" aria-checked="false"><span class="layout-icon"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="2" y="2" width="5" height="12" rx="1"/><rect x="9" y="2" width="5" height="12" rx="1"/></svg></span>Board</button>
+      <button type="button" class="layout-btn" data-layout="calendar" role="radio" aria-checked="false"><span class="layout-icon"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="2" y="3" width="12" height="11" rx="1"/><path d="M2 6.5h12M5.5 1.5v2.5M10.5 1.5v2.5"/></svg></span>Calendar</button>
+    </div>
     <div class="modal-actions">
       <span style="flex:1"></span>
       <button id="project-cancel" class="btn">Cancel</button>

@@ -82,7 +82,7 @@ function taskRow(t) {
       await api("/tasks/" + t.id + "/close", { method: "POST", body: "{}" });
       toast("Task completed");
       reload();
-    } catch (e) { toast("Complete failed: " + e.message, true); }
+    } catch (e) { toast("Complete failed (/tasks/" + t.id + "/close): " + e.message, true); }
   };
   const body = document.createElement("div");
   body.className = "task-body";
@@ -126,7 +126,7 @@ function taskRow(t) {
       await api("/tasks/" + t.id, { method: "DELETE" });
       toast("Task deleted");
       reload();
-    } catch (e) { toast("Delete failed: " + e.message, true); }
+    } catch (e) { toast("Delete failed (/tasks/" + t.id + "): " + e.message, true); }
   };
   acts.appendChild(eb);
   acts.appendChild(db);
@@ -251,21 +251,288 @@ async function loadFilters() {
   });
 }
 
+let projectCache = [];
+let editingProjectId = null;
+let projectOrderHint = null;
+let projectLayout = "list";
+
+function closeAllProjectMenus(except) {
+  document.querySelectorAll(".proj-menu:not(.hidden)").forEach((m) => {
+    if (m !== except) m.classList.add("hidden");
+  });
+  document.querySelectorAll(".proj-menu-btn.open").forEach((b) => {
+    if (!except || b.parentElement.querySelector(".proj-menu") !== except)
+      b.classList.remove("open");
+  });
+}
+
+function comingSoon(label) {
+  toast(label + ": coming in complete app");
+}
+
+async function copyProjectLink(p) {
+  const url = location.origin + "/#project/" + p.id;
+  try {
+    await navigator.clipboard.writeText(url);
+    toast("Link copied");
+  } catch (e) {
+    toast("Copy failed: " + e.message, true);
+  }
+}
+
+function projectMenuItems(p) {
+  const favLabel = p.is_favorite ? "Remove from favorites" : "Add to favorites";
+  const archLabel = p.is_archived ? "Unarchive" : "Archive";
+  return [
+    { action: "add-above", label: "Add project above" },
+    { action: "add-below", label: "Add project below" },
+    { action: "edit", label: "Edit" },
+    { action: "fav", label: favLabel },
+    { action: "share", label: "Share" },
+    { action: "copy-link", label: "Copy link" },
+    { action: "archive", label: archLabel },
+    { action: "delete", label: "Delete", danger: true },
+    { sep: true },
+    { action: "save-template", label: "Save as template" },
+    { action: "apply-template", label: "Apply template" },
+    { action: "comments", label: "Comments" },
+    { action: "activity", label: "View activity" },
+    { action: "extensions", label: "Manage extensions" },
+    { action: "manage-data", label: "Manage data" },
+  ];
+}
+
+async function handleProjectMenuAction(p, action) {
+  try {
+    if (action === "add-above" || action === "add-below") {
+      // Backend has no explicit ordering endpoint for projects; store the
+      // order hint for a future order_key passthrough and create plainly.
+      openProjectModal({ orderHint: { refId: p.id, place: action === "add-above" ? "above" : "below" } });
+    } else if (action === "edit") {
+      openProjectModal({ edit: p });
+    } else if (action === "fav") {
+      await api("/projects/" + p.id, { method: "POST", body: JSON.stringify({ is_favorite: !p.is_favorite }) });
+      toast(p.is_favorite ? "Removed from favorites" : "Added to favorites");
+      loadProjects();
+    } else if (action === "share" || action === "copy-link") {
+      await copyProjectLink(p);
+    } else if (action === "archive") {
+      if (p.is_archived) {
+        await api("/projects/" + p.id + "/unarchive", { method: "POST", body: "{}" });
+        toast("Project unarchived");
+      } else {
+        await api("/projects/" + p.id + "/archive", { method: "POST", body: "{}" });
+        toast("Project archived");
+      }
+      loadProjects();
+    } else if (action === "delete") {
+      if (!confirm("Delete '" + p.name + "'?")) return;
+      await api("/projects/" + p.id, { method: "DELETE" });
+      toast("Project deleted");
+      if (activeProject === p.id) setView("today");
+      else loadProjects();
+    } else if (["save-template", "apply-template", "comments", "activity", "extensions", "manage-data"].includes(action)) {
+      const labels = {
+        "save-template": "Save as template",
+        "apply-template": "Apply template",
+        "comments": "Comments",
+        "activity": "View activity",
+        "extensions": "Manage extensions",
+        "manage-data": "Manage data",
+      };
+      comingSoon(labels[action]);
+    }
+  } catch (e) {
+    toast("Project action failed (/projects/" + p.id + "): " + e.message, true);
+  }
+}
+
+function projectRow(p) {
+  const row = document.createElement("div");
+  row.className = "proj-row" + (activeProject === p.id ? " active" : "");
+  const b = document.createElement("button");
+  b.className = "proj-item" + (activeProject === p.id ? " active" : "");
+  const dot = document.createElement("span");
+  dot.className = "proj-dot";
+  b.appendChild(dot);
+  const nm = document.createElement("span");
+  nm.className = "proj-name";
+  nm.textContent = p.name;
+  b.appendChild(nm);
+  if (p.is_favorite) {
+    const star = document.createElement("span");
+    star.className = "proj-fav-star";
+    star.textContent = "★";
+    star.title = "Favorite";
+    b.appendChild(star);
+  }
+  b.title = p.name;
+  b.onclick = () => setView("project", p);
+  row.appendChild(b);
+  const mb = document.createElement("button");
+  mb.className = "proj-menu-btn";
+  mb.textContent = "⋯";
+  mb.title = "Project actions";
+  mb.setAttribute("aria-label", "Project actions for " + p.name);
+  const menu = document.createElement("div");
+  menu.className = "proj-menu hidden";
+  projectMenuItems(p).forEach((it) => {
+    if (it.sep) {
+      const s = document.createElement("div");
+      s.className = "menu-sep";
+      menu.appendChild(s);
+      return;
+    }
+    const mi = document.createElement("button");
+    mi.textContent = it.label;
+    if (it.danger) mi.className = "danger";
+    mi.dataset.action = it.action;
+    mi.onclick = (ev) => {
+      ev.stopPropagation();
+      menu.classList.add("hidden");
+      mb.classList.remove("open");
+      handleProjectMenuAction(p, it.action);
+    };
+    menu.appendChild(mi);
+  });
+  mb.onclick = (ev) => {
+    ev.stopPropagation();
+    const wasHidden = menu.classList.contains("hidden");
+    closeAllProjectMenus();
+    if (wasHidden) {
+      menu.classList.remove("hidden");
+      mb.classList.add("open");
+    }
+  };
+  row.appendChild(mb);
+  row.appendChild(menu);
+  return row;
+}
+
+function populateParentSelect(keepId) {
+  const sel = document.getElementById("project-parent");
+  const cur = keepId !== undefined ? keepId : sel.value;
+  sel.innerHTML = "";
+  const none = document.createElement("option");
+  none.value = "";
+  none.textContent = "No Parent";
+  sel.appendChild(none);
+  projectCache.forEach((p) => {
+    if (editingProjectId && p.id === editingProjectId) return;
+    const o = document.createElement("option");
+    o.value = p.id;
+    o.textContent = p.name;
+    sel.appendChild(o);
+  });
+  sel.value = cur || "";
+}
+
+function setProjectLayout(l) {
+  projectLayout = l;
+  document.querySelectorAll("#project-layout .layout-btn").forEach((btn) => {
+    const on = btn.dataset.layout === l;
+    btn.classList.toggle("active", on);
+    btn.setAttribute("aria-checked", on ? "true" : "false");
+  });
+}
+
+function updateNameCount() {
+  const inp = document.getElementById("project-input");
+  document.getElementById("project-name-count").textContent = inp.value.length + "/120";
+}
+
+function setFavToggle(on) {
+  document.getElementById("project-fav").checked = on;
+  const t = document.getElementById("project-fav-toggle");
+  t.setAttribute("aria-checked", on ? "true" : "false");
+}
+
+function resetProjectModal() {
+  editingProjectId = null;
+  projectOrderHint = null;
+  document.getElementById("project-modal-title").firstChild.textContent = "Add project ";
+  document.getElementById("project-input").value = "";
+  document.getElementById("project-desc").value = "";
+  document.getElementById("project-color").value = "charcoal";
+  document.getElementById("project-workspace").value = "My Projects";
+  setFavToggle(false);
+  setProjectLayout("list");
+  document.getElementById("project-submit").textContent = "Add";
+  populateParentSelect("");
+  updateNameCount();
+}
+
+function openProjectModal(opts = {}) {
+  resetProjectModal();
+  if (opts.orderHint) {
+    // Order hint only: backend creates with default order_key (plain create).
+    projectOrderHint = opts.orderHint;
+  }
+  if (opts.edit) {
+    const p = opts.edit;
+    editingProjectId = p.id;
+    document.getElementById("project-modal-title").firstChild.textContent = "Edit project ";
+    document.getElementById("project-input").value = p.name || "";
+    document.getElementById("project-desc").value = p.description || "";
+    document.getElementById("project-color").value = p.color || "charcoal";
+    document.getElementById("project-workspace").value = p.workspace || "My Projects";
+    setFavToggle(!!p.is_favorite);
+    setProjectLayout(p.layout || "list");
+    document.getElementById("project-access").value = p.access || "Restricted";
+    document.getElementById("project-submit").textContent = "Save";
+    populateParentSelect(p.parent_id || "");
+  }
+  updateNameCount();
+  document.getElementById("project-modal").classList.remove("hidden");
+  setTimeout(() => document.getElementById("project-input").focus(), 30);
+}
+
+function closeProjectModal() {
+  document.getElementById("project-modal").classList.add("hidden");
+}
+
+async function submitProjectModal() {
+  const name = document.getElementById("project-input").value.trim();
+  if (!name) { toast("Project name required", true); return; }
+  const payload = {
+    name,
+    description: document.getElementById("project-desc").value,
+    color: document.getElementById("project-color").value,
+    workspace: document.getElementById("project-workspace").value,
+    parent_id: document.getElementById("project-parent").value || null,
+    access: document.getElementById("project-access").value,
+    is_favorite: document.getElementById("project-fav").checked,
+    layout: projectLayout,
+  };
+  try {
+    if (editingProjectId) {
+      await api("/projects/" + editingProjectId, { method: "POST", body: JSON.stringify(payload) });
+      toast("Project updated");
+    } else {
+      await api("/projects", { method: "POST", body: JSON.stringify(payload) });
+      toast("Project added");
+    }
+    closeProjectModal();
+    resetProjectModal();
+    loadProjects();
+  } catch (e) {
+    const path = editingProjectId ? "/projects/" + editingProjectId : "/projects";
+    toast("Project save failed (" + path + "): " + e.message, true);
+  }
+}
+
 async function loadProjects() {
   try {
     const projs = await api("/projects");
+    projectCache = (projs || []).filter((p) => !p.is_deleted);
     const box = document.getElementById("project-list");
     box.innerHTML = "";
-    (projs || []).filter((p) => !p.is_deleted).forEach((p) => {
+    projectCache.forEach((p) => {
       projectNames[p.id] = p.name;
-      const b = document.createElement("button");
-      b.className = "proj-item" + (activeProject === p.id ? " active" : "");
-      b.innerHTML = "<span>#</span> ";
-      b.appendChild(document.createTextNode(p.name));
-      b.onclick = () => setView("project", p);
-      box.appendChild(b);
+      box.appendChild(projectRow(p));
     });
-  } catch (e) { /* offline */ }
+    populateParentSelect();
+  } catch (e) { toast("Projects load failed (/projects): " + e.message, true); }
 }
 
 async function reload() {
@@ -289,7 +556,7 @@ function setView(v, proj) {
   );
   if (v === "project" && proj) {
     activeProject = proj.id;
-    loadProject(proj.id, proj.name).catch((e) => toast(e.message, true));
+    loadProject(proj.id, proj.name).catch((e) => toast("Project tasks load failed (/tasks): " + e.message, true));
     loadProjects();
   } else {
     activeProject = null;
@@ -330,7 +597,7 @@ document.addEventListener("DOMContentLoaded", () => {
     clearTimeout(deb);
     const q = si.value.trim();
     if (!q) { if (view === "search") setView("today"); return; }
-    deb = setTimeout(() => { view = "search"; loadSearch(q).catch((e) => toast(e.message, true)); }, 350);
+    deb = setTimeout(() => { view = "search"; loadSearch(q).catch((e) => toast("Search failed (/tasks/filter): " + e.message, true)); }, 350);
   });
 
   const qi = document.getElementById("quick-input");
@@ -352,7 +619,7 @@ document.addEventListener("DOMContentLoaded", () => {
       closeQuick();
       qi.value = "";
       reload();
-    } catch (e) { toast("Add failed: " + e.message, true); }
+    } catch (e) { toast("Add failed (/tasks/quick): " + e.message, true); }
   };
 
   document.getElementById("edit-cancel").onclick = () =>
@@ -365,29 +632,29 @@ document.addEventListener("DOMContentLoaded", () => {
       toast("Task updated");
       document.getElementById("edit-modal").classList.add("hidden");
       reload();
-    } catch (e) { toast("Update failed: " + e.message, true); }
+    } catch (e) { toast("Update failed (/tasks/" + editingId + "): " + e.message, true); }
   };
 
   const pm = document.getElementById("project-modal");
-  document.getElementById("add-project-btn").onclick = () => {
-    pm.classList.remove("hidden");
-    setTimeout(() => document.getElementById("project-input").focus(), 30);
-  };
-  document.getElementById("project-cancel").onclick = () => pm.classList.add("hidden");
-  document.getElementById("project-submit").onclick = async () => {
-    const name = document.getElementById("project-input").value.trim();
-    if (!name) { toast("Project name required", true); return; }
-    try {
-      await api("/projects", { method: "POST", body: JSON.stringify({ name }) });
-      toast("Project added");
-      pm.classList.add("hidden");
-      document.getElementById("project-input").value = "";
-      loadProjects();
-    } catch (e) { toast("Project add failed: " + e.message, true); }
-  };
+  document.getElementById("add-project-btn").onclick = () => openProjectModal();
+  document.getElementById("project-cancel").onclick = closeProjectModal;
+  document.getElementById("project-x").onclick = closeProjectModal;
+  document.getElementById("project-input").addEventListener("input", updateNameCount);
+  document.getElementById("project-fav-toggle").onclick = () =>
+    setFavToggle(!document.getElementById("project-fav").checked);
+  document.querySelectorAll("#project-layout .layout-btn").forEach((btn) =>
+    btn.addEventListener("click", () => setProjectLayout(btn.dataset.layout))
+  );
+  document.getElementById("project-submit").onclick = submitProjectModal;
+  pm.addEventListener("click", (e) => { if (e.target === pm) closeProjectModal(); });
+
+  document.addEventListener("click", (e) => {
+    if (!e.target.closest || !e.target.closest(".proj-row")) closeAllProjectMenus();
+  });
 
   document.addEventListener("keydown", (e) => {
     if (e.key === "Escape") {
+      closeAllProjectMenus();
       document.querySelectorAll(".modal").forEach((m) => m.classList.add("hidden"));
     }
   });
