@@ -5,6 +5,34 @@ from app.models import new_id
 
 router = APIRouter()
 
+PROJECT_COLORS = {
+    "berry_red", "red", "orange", "yellow", "olive_green", "lime_green",
+    "green", "mint_green", "teal", "sky_blue", "light_blue", "blue",
+    "grape", "violet", "lavender", "magenta", "salmon", "charcoal",
+    "grey", "taupe",
+}
+PROJECT_LAYOUTS = {"list", "board", "calendar"}
+
+
+def _coerce_favorite(v):
+    if isinstance(v, bool):
+        return v
+    if isinstance(v, int):
+        return bool(v)
+    if isinstance(v, str):
+        return v.strip().lower() in ("1", "true", "yes")
+    return bool(v)
+
+
+def _validate_color(color):
+    if color not in PROJECT_COLORS:
+        raise HTTPException(400, "invalid color")
+
+
+def _validate_layout(layout):
+    if layout not in PROJECT_LAYOUTS:
+        raise HTTPException(400, "invalid layout")
+
 
 def _con():
     from app.api_tasks import _con as _tasks_con
@@ -13,9 +41,26 @@ def _con():
 
 
 def _project_to_api(r):
+    keys = r.keys() if hasattr(r, "keys") else []
+    def _get(col, default=None):
+        try:
+            if col in keys:
+                v = r[col]
+                return default if v is None and default is not None else v
+            return default
+        except Exception:
+            return default
+    fav = _get("is_favorite", 0)
     return {
         "id": r["id"],
         "name": r["name"],
+        "description": _get("description", "") or "",
+        "color": _get("color", "charcoal") or "charcoal",
+        "workspace": _get("workspace", "My Projects") or "My Projects",
+        "parent_id": _get("parent_id", None),
+        "access": _get("access", "Restricted") or "Restricted",
+        "is_favorite": bool(fav) if not isinstance(fav, bool) else fav,
+        "layout": _get("layout", "list") or "list",
         "is_archived": bool(r["is_archived"]),
         "is_deleted": bool(r["is_deleted"]),
         "order_key": r["order_key"] if "order_key" in r.keys() else "a0",
@@ -43,10 +88,37 @@ def create_project(body: dict, uid: str = Depends(require_user)):
     name = (body.get("name") or "").strip() if isinstance(body, dict) else ""
     if not name:
         raise HTTPException(400, "name required")
+    description = body.get("description", "")
+    color = body.get("color", "charcoal")
+    workspace = body.get("workspace", "My Projects")
+    parent_id = body.get("parent_id")
+    access = body.get("access", "Restricted")
+    is_favorite = _coerce_favorite(body.get("is_favorite", False))
+    layout = body.get("layout", "list")
+    if description is None:
+        description = ""
+    description = str(description)
+    if color is None or (isinstance(color, str) and not color.strip()):
+        color = "charcoal"
+    color = str(color).strip()
+    _validate_color(color)
+    if workspace is None or (isinstance(workspace, str) and not workspace.strip()):
+        workspace = "My Projects"
+    workspace = str(workspace)
+    if parent_id is not None:
+        parent_id = str(parent_id) if str(parent_id).strip() else None
+    if access is None or (isinstance(access, str) and not access.strip()):
+        access = "Restricted"
+    access = str(access)
+    if layout is None or (isinstance(layout, str) and not layout.strip()):
+        layout = "list"
+    layout = str(layout).strip()
+    _validate_layout(layout)
     con = _con()
     pid = new_id()
     con.execute(
-        "INSERT INTO projects(id,user_id,name) VALUES(?,?,?)", (pid, uid, name)
+        "INSERT INTO projects(id,user_id,name,description,color,workspace,parent_id,access,is_favorite,layout) VALUES(?,?,?,?,?,?,?,?,?,?)",
+        (pid, uid, name, description, color, workspace, parent_id, access, 1 if is_favorite else 0, layout),
     )
     con.commit()
     row = con.execute("SELECT * FROM projects WHERE id=?", (pid,)).fetchone()
@@ -88,7 +160,30 @@ def update_project(pid: str, body: dict, uid: str = Depends(require_user)):
         if not name:
             raise HTTPException(400, "name required")
         con.execute("UPDATE projects SET name=? WHERE id=?", (name, pid))
-        con.commit()
+    if "description" in body:
+        v = body["description"]
+        con.execute("UPDATE projects SET description=? WHERE id=?", ("" if v is None else str(v), pid))
+    if "color" in body and body["color"] is not None:
+        color = str(body["color"]).strip() or "charcoal"
+        _validate_color(color)
+        con.execute("UPDATE projects SET color=? WHERE id=?", (color, pid))
+    if "workspace" in body and body["workspace"] is not None:
+        ws = str(body["workspace"]).strip() or "My Projects"
+        con.execute("UPDATE projects SET workspace=? WHERE id=?", (ws, pid))
+    if "parent_id" in body:
+        pv = body["parent_id"]
+        pv = None if pv is None or (isinstance(pv, str) and not pv.strip()) else str(pv)
+        con.execute("UPDATE projects SET parent_id=? WHERE id=?", (pv, pid))
+    if "access" in body and body["access"] is not None:
+        av = str(body["access"]).strip() or "Restricted"
+        con.execute("UPDATE projects SET access=? WHERE id=?", (av, pid))
+    if "is_favorite" in body and body["is_favorite"] is not None:
+        con.execute("UPDATE projects SET is_favorite=? WHERE id=?", (1 if _coerce_favorite(body["is_favorite"]) else 0, pid))
+    if "layout" in body and body["layout"] is not None:
+        layout = str(body["layout"]).strip() or "list"
+        _validate_layout(layout)
+        con.execute("UPDATE projects SET layout=? WHERE id=?", (layout, pid))
+    con.commit()
     row = con.execute("SELECT * FROM projects WHERE id=?", (pid,)).fetchone()
     return _project_to_api(row)
 

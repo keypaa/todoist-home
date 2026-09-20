@@ -461,11 +461,29 @@ async def sync_read(request: Request, uid: str = Depends(require_user)):
     prows = con.execute(
         "SELECT * FROM projects WHERE user_id=? AND is_deleted=0 AND is_archived=0", (uid,)
     ).fetchall()
-    projects = [
-        {"id": r["id"], "name": r["name"], "is_archived": False, "is_deleted": False,
-         "order_key": r["order_key"] if "order_key" in r.keys() else "a0"}
-        for r in prows
-    ]
+    def _pcol(r, col, default=None):
+        try:
+            if col in r.keys():
+                v = r[col]
+                return default if v is None and default is not None else v
+            return default
+        except Exception:
+            return default
+    projects = []
+    for r in prows:
+        _fav = _pcol(r, "is_favorite", 0)
+        projects.append({
+            "id": r["id"], "name": r["name"],
+            "description": _pcol(r, "description", "") or "",
+            "color": _pcol(r, "color", "charcoal") or "charcoal",
+            "workspace": _pcol(r, "workspace", "My Projects") or "My Projects",
+            "parent_id": _pcol(r, "parent_id", None),
+            "access": _pcol(r, "access", "Restricted") or "Restricted",
+            "is_favorite": bool(_fav),
+            "layout": _pcol(r, "layout", "list") or "list",
+            "is_archived": False, "is_deleted": False,
+            "order_key": r["order_key"] if "order_key" in r.keys() else "a0",
+        })
     # Sections (non-archived, non-deleted).
     srows = con.execute(
         "SELECT * FROM sections WHERE is_deleted=0 AND is_archived=0"

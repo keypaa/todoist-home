@@ -2,7 +2,7 @@ import sqlite3, os
 SCHEMA = """
 PRAGMA journal_mode=WAL;
 CREATE TABLE IF NOT EXISTS users(id TEXT PRIMARY KEY, email TEXT);
-CREATE TABLE IF NOT EXISTS projects(id TEXT PRIMARY KEY, user_id TEXT NOT NULL DEFAULT '1', name TEXT NOT NULL, is_archived INTEGER NOT NULL DEFAULT 0, is_deleted INTEGER NOT NULL DEFAULT 0, order_key TEXT DEFAULT 'a0');
+CREATE TABLE IF NOT EXISTS projects(id TEXT PRIMARY KEY, user_id TEXT NOT NULL DEFAULT '1', name TEXT NOT NULL, description TEXT NOT NULL DEFAULT '', color TEXT NOT NULL DEFAULT 'charcoal', workspace TEXT NOT NULL DEFAULT 'My Projects', parent_id TEXT, access TEXT NOT NULL DEFAULT 'Restricted', is_favorite INTEGER NOT NULL DEFAULT 0, layout TEXT NOT NULL DEFAULT 'list', is_archived INTEGER NOT NULL DEFAULT 0, is_deleted INTEGER NOT NULL DEFAULT 0, order_key TEXT DEFAULT 'a0');
 CREATE TABLE IF NOT EXISTS sections(id TEXT PRIMARY KEY, project_id TEXT NOT NULL, name TEXT NOT NULL, is_archived INTEGER NOT NULL DEFAULT 0, is_deleted INTEGER NOT NULL DEFAULT 0, order_key TEXT DEFAULT 'a0');
 CREATE TABLE IF NOT EXISTS labels(id TEXT PRIMARY KEY, user_id TEXT NOT NULL DEFAULT '1', name TEXT NOT NULL, is_deleted INTEGER NOT NULL DEFAULT 0);
 CREATE TABLE IF NOT EXISTS tasks(id TEXT PRIMARY KEY, user_id TEXT NOT NULL DEFAULT '1', content TEXT NOT NULL, description TEXT NOT NULL DEFAULT '', project_id TEXT NOT NULL, section_id TEXT, parent_id TEXT, priority INTEGER NOT NULL DEFAULT 1, due_date TEXT, due_datetime TEXT, due_timezone TEXT, due_string TEXT, due_lang TEXT DEFAULT 'en', is_recurring INTEGER NOT NULL DEFAULT 0, deadline_date TEXT, duration_amount INTEGER, duration_unit TEXT, responsible_uid TEXT, order_key TEXT DEFAULT 'a0', completed INTEGER NOT NULL DEFAULT 0, is_deleted INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
@@ -36,9 +36,31 @@ def get_db(path=None):
     con.execute("PRAGMA journal_mode=WAL;")
     con.execute("PRAGMA busy_timeout=5000;")
     return con
+
+
+PROJECT_COLUMNS = [
+    ("description", "TEXT NOT NULL DEFAULT ''"),
+    ("color", "TEXT NOT NULL DEFAULT 'charcoal'"),
+    ("workspace", "TEXT NOT NULL DEFAULT 'My Projects'"),
+    ("parent_id", "TEXT"),
+    ("access", "TEXT NOT NULL DEFAULT 'Restricted'"),
+    ("is_favorite", "INTEGER NOT NULL DEFAULT 0"),
+    ("layout", "TEXT NOT NULL DEFAULT 'list'"),
+]
+
+
+def ensure_project_columns(con):
+    cols = {r[1] for r in con.execute("PRAGMA table_info(projects)").fetchall()}
+    for name, ddl in PROJECT_COLUMNS:
+        if name not in cols:
+            con.execute(f"ALTER TABLE projects ADD COLUMN {name} {ddl}")
+    con.commit()
+
+
 def init_db(path=None):
     con = get_db(path)
     con.executescript(SCHEMA)
+    ensure_project_columns(con)
     con.execute("INSERT OR IGNORE INTO users(id,email) VALUES('1','local@opendoist')")
     con.execute("INSERT OR IGNORE INTO projects(id,name) VALUES('inbox','Inbox')")
     con.commit()
