@@ -23,7 +23,7 @@ async function api(path, opts = {}) {
   });
   if (!r.ok) {
     const t = await r.text();
-    throw new Error(t || ("HTTP " + r.status()));
+    throw new Error(t || ("HTTP " + r.status));
   }
   const ct = r.headers.get("content-type") || "";
   return ct.includes("json") ? r.json() : r.text();
