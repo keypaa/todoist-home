@@ -18,6 +18,28 @@ function toast(msg, isErr) {
 
 let pendingDeleteAction = null;
 
+function setSidebarCollapsed(collapsed) {
+  document.getElementById("app").classList.toggle("sidebar-collapsed", collapsed);
+  try {
+    localStorage.setItem("opendoist_sidebar_collapsed", collapsed ? "1" : "0");
+  } catch (e) { /* storage unavailable */ }
+}
+
+function initSidebarToggle() {
+  let collapsed = false;
+  try {
+    collapsed = localStorage.getItem("opendoist_sidebar_collapsed") === "1";
+  } catch (e) { /* storage unavailable */ }
+  setSidebarCollapsed(collapsed);
+  const t = document.getElementById("sidebar-toggle");
+  if (t) t.addEventListener("click", () =>
+    setSidebarCollapsed(!document.getElementById("app").classList.contains("sidebar-collapsed")));
+  const r = document.getElementById("sidebar-reopen");
+  if (r) r.addEventListener("click", () => setSidebarCollapsed(false));
+  const n = document.getElementById("notif-btn");
+  if (n) n.addEventListener("click", () => toast("Notifications coming in complete app"));
+}
+
 function escapeHtml(s) {
   return String(s).replace(/[&<>"']/g, (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 }
@@ -617,6 +639,7 @@ function openEdit(t) {
 }
 
 document.addEventListener("DOMContentLoaded", () => {
+  initSidebarToggle();
   document.querySelectorAll("#main-nav .nav-item[data-view]").forEach((b) =>
     b.addEventListener("click", () => setView(b.dataset.view))
   );

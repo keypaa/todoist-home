@@ -14,7 +14,7 @@
     <div class="user-row">
       <div class="avatar">O</div>
       <div class="user-name">OpenDoist</div>
-      <div class="user-icons"><span title="Notifications">🔔</span><span title="Sidebar">◫</span></div>
+      <div class="user-icons"><span id="notif-btn" title="Notifications" role="button" tabindex="0" style="cursor:pointer">🔔</span><span id="sidebar-toggle" title="Sidebar" role="button" tabindex="0" style="cursor:pointer">◫</span></div>
     </div>
     <button id="nav-add" class="add-task-btn"><span class="plus">＋</span> Add task</button>
     <div class="search-row">
@@ -36,6 +36,7 @@
       <button class="nav-item small" id="smart-sort-info" title="Smart sort order: due date, priority, deadline">ⓘ Smart sort</button>
     </div>
   </aside>
+  <button id="sidebar-reopen" title="Show sidebar" aria-label="Show sidebar">◫</button>
   <main id="main">
     <div id="view-head">
       <h1 id="view-title">Today</h1>
