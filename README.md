@@ -69,3 +69,6 @@ default `http://localhost:8000/api/v1`).
 ```bash
 python -m pytest -q
 ```
+
+## Languages (quick-add dates)
+EN + FR ship with parity. Add a language in 3 steps: 1) create `app/nlp/<code>.py` with `find_dates(text, today) -> {due_date, due_datetime, spans}`, 2) `register("<code>", module)` in `app/nlp/__init__.py` (+ detect markers if auto-detect should find it), 3) add `tests/test_nlp_<code>.py` mirroring the parity table.
