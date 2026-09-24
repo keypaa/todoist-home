@@ -455,7 +455,8 @@ def quick_add(body: dict, request: Request, uid: str = Depends(require_user)):
         raise HTTPException(400, "text required")
     # body.get("auto_reminder") accepted + ignored (V1)
     today_iso = datetime.date.today().isoformat()
-    p = parse_quick_add(text, today_iso)
+    lang_req = body.get("lang", "auto") if isinstance(body, dict) else "auto"
+    p = parse_quick_add(text, today_iso, lang_req)
     due_date = p["due_date"] or today_iso
     # Resolve project name -> id (auto-create); default inbox.
     if p["project"]:
@@ -504,7 +505,7 @@ def quick_add(body: dict, request: Request, uid: str = Depends(require_user)):
     now = now_iso()
     con.execute(
         "INSERT INTO tasks(id,user_id,content,description,project_id,section_id,priority,due_date,due_string,due_lang,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
-        (tid, uid, p["content"], "", pid, sid, p["priority"], due_date, text, "en", now, now),
+        (tid, uid, p["content"], "", pid, sid, p["priority"], due_date, text, p["lang"], now, now),
     )
     for lid, _name in label_ids:
         con.execute(
