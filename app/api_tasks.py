@@ -504,8 +504,8 @@ def quick_add(body: dict, request: Request, uid: str = Depends(require_user)):
     tid = new_id()
     now = now_iso()
     con.execute(
-        "INSERT INTO tasks(id,user_id,content,description,project_id,section_id,priority,due_date,due_string,due_lang,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
-        (tid, uid, p["content"], "", pid, sid, p["priority"], due_date, text, p["lang"], now, now),
+        "INSERT INTO tasks(id,user_id,content,description,project_id,section_id,priority,due_date,due_datetime,due_string,due_lang,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (tid, uid, p["content"], "", pid, sid, p["priority"], due_date, p["due_datetime"], text, p["lang"], now, now),
     )
     for lid, _name in label_ids:
         con.execute(
